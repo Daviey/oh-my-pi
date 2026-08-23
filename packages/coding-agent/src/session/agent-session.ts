@@ -239,7 +239,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { getLatestTodoPhasesFromEntries, type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
@@ -9391,14 +9391,18 @@ export class AgentSession implements SettingsScope {
 	 */
 	#rejournalControlEntries(): void {
 		let branchModel: string | undefined;
-		let branchThinking: string | undefined;
+		let branchThinkingLevel: string | undefined;
+		let branchThinkingConfigured: string | undefined;
 		let branchTier: string | undefined;
+		let sawTierEntry = false;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type === "model_change") {
 				if ((entry.role ?? "default") === "default" && entry.model) branchModel = entry.model;
 			} else if (entry.type === "thinking_level_change") {
-				branchThinking = entry.thinkingLevel ?? "off";
+				branchThinkingLevel = entry.thinkingLevel ?? "off";
+				branchThinkingConfigured = entry.configured ?? entry.thinkingLevel ?? "off";
 			} else if (entry.type === "service_tier_change") {
+				sawTierEntry = true;
 				branchTier = JSON.stringify(entry.serviceTier ?? null);
 			}
 		}
@@ -9407,13 +9411,37 @@ export class AgentSession implements SettingsScope {
 			this.sessionManager.appendModelChange(`${live.provider}/${live.id}`, "default");
 		}
 		const liveThinking = this.thinkingLevel;
-		if (liveThinking !== undefined && liveThinking !== branchThinking) {
+		// Compare the configured selector too: `medium` vs `auto` resolving to
+		// medium differ in what a reload should restore even at equal levels.
+		if (
+			liveThinking !== undefined &&
+			(liveThinking !== branchThinkingLevel || this.configuredThinkingLevel() !== branchThinkingConfigured)
+		) {
 			this.sessionManager.appendThinkingLevelChange(liveThinking, this.configuredThinkingLevel());
 		}
-		const liveTierEntry = this.#models.serviceTierEntry();
-		if (liveTierEntry && JSON.stringify(liveTierEntry) !== branchTier) {
-			this.sessionManager.appendServiceTierChange(liveTierEntry);
+		// Tier clears are durable state: a null live entry must still
+		// overwrite a non-null branch value, so compare null-normalized forms
+		// and re-record the null explicitly.
+		const liveTier = this.#models.serviceTierEntry();
+		const liveTierJson = JSON.stringify(liveTier ?? null);
+		const branchTierJson = sawTierEntry ? branchTier : "null";
+		if (liveTierJson !== branchTierJson) {
+			this.sessionManager.appendServiceTierChange(liveTier);
 		}
+	}
+
+	/**
+	 * Record the live todo phases as a durable `user_todo_edit` snapshot on
+	 * the rewound branch. The rollback contract keeps live todo state, but a
+	 * reload syncs phases from the branch, where the latest todo tool result
+	 * is now off-branch; without a snapshot the visible list reverts on load.
+	 */
+	#recordTodoSnapshot(): void {
+		const phases = this.getTodoPhases();
+		if (phases.length === 0) return;
+		const branchLatest = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
+		if (JSON.stringify(branchLatest) === JSON.stringify(phases)) return;
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
 	/**
@@ -9548,6 +9576,7 @@ export class AgentSession implements SettingsScope {
 		// it, restoring what /undo just removed.
 		this.#rehydrateCheckpointRewindState();
 		this.#rejournalControlEntries();
+		this.#recordTodoSnapshot();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
 	}
@@ -9593,7 +9622,8 @@ export class AgentSession implements SettingsScope {
 					entry =>
 						entry.type === "model_change" ||
 						entry.type === "thinking_level_change" ||
-						entry.type === "service_tier_change",
+						entry.type === "service_tier_change" ||
+						(entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
 				);
 		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyControlsTrailing)) {
 			return { ok: false, error: "Turns were appended after the /undo — redo is no longer possible." };
@@ -9614,6 +9644,7 @@ export class AgentSession implements SettingsScope {
 		// Same as /undo: rebuild checkpoint state from the restored branch.
 		this.#rehydrateCheckpointRewindState();
 		this.#rejournalControlEntries();
+		this.#recordTodoSnapshot();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}
