@@ -23,7 +23,7 @@ import type { Setting } from "../config/registry";
 
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { isProcessAlive, readSessionOwnerPid, SessionManager } from "../session/session-manager";
+import { isProcessAlive, readSessionOwnerPids, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import {
 	cfgGcArchive,
@@ -1718,8 +1718,9 @@ function renderText(result: GcResult): string {
 
 /**
  * Prune off-branch tails of older user-undo branches across active sessions.
- * Sessions with a live owner process (append-writer sidecar) are skipped: an
- * open AgentSession holds those entries in memory and would re-append them.
+ * Sessions with any live owner process (append-writer pid sidecar) are
+ * skipped: an open AgentSession holds those entries in memory and would
+ * re-append them.
  */
 async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
@@ -1739,8 +1740,8 @@ async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResu
 		// in-memory tree. SessionStatus is journal-tail state ("complete"
 		// means the last turn yielded, not that nobody has it open), so it is
 		// deliberately not used here.
-		const ownerPid = readSessionOwnerPid(session.path);
-		if (ownerPid !== undefined && isProcessAlive(ownerPid)) {
+		const ownerPids = readSessionOwnerPids(session.path);
+		if (ownerPids.some(pid => isProcessAlive(pid))) {
 			result.skippedLive++;
 			continue;
 		}
