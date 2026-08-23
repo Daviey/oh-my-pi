@@ -6272,7 +6272,9 @@ export class AgentSession implements SettingsScope {
 		const manager = this.#ttsr.manager;
 		if (!manager) return;
 		const ruleNames = new Set<string>();
+		let branchMessageCount = 0;
 		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "message") branchMessageCount++;
 			if (entry.type === "ttsr_injection") {
 				for (const name of entry.injectedRules) ruleNames.add(name);
 			} else if (entry.type === "message") {
@@ -6287,6 +6289,10 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		manager.restoreInjected([...ruleNames]);
+		// Counter and injection positions realign together: the live counter
+		// would otherwise still sit at its pre-rewind value, making retained
+		// after-gap rules instantly eligible.
+		manager.rewindMessageCount(branchMessageCount);
 	}
 
 	#rehydrateCheckpointRewindState(): void {
