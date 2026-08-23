@@ -9688,8 +9688,11 @@ export class AgentSession implements SettingsScope {
 		}
 		// Live role comes from the pre-restore journal (the undo path's
 		// re-journal made it the last role); pass it so redo does not flatten
-		// a smol/slow selection back to default.
+		// a smol/slow selection back to default. The same holds for a mode
+		// change made after the undo: re-journal the live payload on the
+		// restored branch so a reload keeps it.
 		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
+		const preRedoMode = this.sessionManager.buildSessionContext();
 		// Silent like /undo: the marker renders nothing, so context after
 		// /redo is simply the restored turns — no trace that an undo cycle
 		// happened.
@@ -9703,6 +9706,7 @@ export class AgentSession implements SettingsScope {
 		this.#rehydrateCheckpointRewindState();
 		this.#rejournalControlEntries(liveRole);
 		this.#recordTodoSnapshot();
+		this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return { ok: true };
 	}
