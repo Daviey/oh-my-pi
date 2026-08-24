@@ -3251,6 +3251,10 @@ export class AgentSession implements SettingsScope {
 					// otherwise records emission time, which on rebuild excludes
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
+					// hookMessage never carries a rollback marker.
+					message.role === "custom"
+						? { userTurn: message.userTurn, promptPrelude: message.promptPrelude }
+						: undefined,
 				);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -9711,15 +9715,14 @@ export class AgentSession implements SettingsScope {
 	 * A user turn: a user message, a user-invoked `/skill:<name>` prompt, a
 	 * collaborative guest prompt, or any user-attributed custom message that
 	 * went through the prompt flow (extension sendMessage with triggerTurn) —
-	 * the latter is persisted ownership via details.userTurn, stamped by
-	 * #promptWithMessage. Skill and collab prompts also reach the journal as
-	 * legacy customTypes. Centralized so /undo, /revert, and the picker agree.
-	 * Both prompt shapes persist `details` verbatim through
-	 * appendCustomMessageEntry / #persistMessageEnd.
+	 * the latter is persisted ownership via the userTurn marker (a sibling of
+	 * details), stamped by #promptWithMessage. Skill and collab prompts also
+	 * reach the journal as legacy customTypes. Centralized so /undo, /revert,
+	 * and the picker agree.
 	 */
 	#isUserTurnEntry(entry: SessionEntry): boolean {
 		if (entry.type === "custom_message") {
-			if (isRecord(entry.details) && entry.details.userTurn === true && entry.attribution === "user") {
+			if (entry.userTurn === true && entry.attribution === "user") {
 				return true;
 			}
 			return (
@@ -9735,7 +9738,7 @@ export class AgentSession implements SettingsScope {
 		return (
 			(message.role === "user" && message.attribution !== "agent") ||
 			(message.role === "custom" &&
-				((isRecord(message.details) && message.details.userTurn === true && message.attribution === "user") ||
+				((message.userTurn === true && message.attribution === "user") ||
 					isUserInvokedSkillPrompt(message) ||
 					(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")))
 		);
@@ -10011,9 +10014,10 @@ export class AgentSession implements SettingsScope {
 	 * whole batch.
 	 *
 	 * Ownership is persisted: #promptWithMessage stamps each prelude
-	 * message's `details` with `promptPrelude: true` before dispatch and
-	 * #persistMessageEnd copies it to the journal entry, so any future
-	 * prelude type is covered without touching this predicate. The
+	 * message with the promptPrelude marker (a sibling of `details`)
+	 * before dispatch and #persistMessageEnd copies it to the journal
+	 * entry, so any future prelude type is covered without touching this
+	 * predicate. The
 	 * customType whitelist below remains only for journals persisted before
 	 * the stamp existed. An extension's independent
 	 * sendCustomMessage({ triggerTurn: false }) carries neither marker and
@@ -10021,7 +10025,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	#isPromptPreludeEntry(entry: SessionEntry): boolean {
 		if (entry.type !== "custom_message") return false;
-		if (isRecord(entry.details) && entry.details.promptPrelude === true) return true;
+		if (entry.promptPrelude === true) return true;
 		const customType = entry.customType;
 		return (
 			customType === "ultrathink-notice" ||
@@ -12785,16 +12789,12 @@ export class AgentSession implements SettingsScope {
 
 /**
  * Stamp a persisted ownership marker (`promptPrelude` / `userTurn`) onto a
- * custom message without destructively merging into an arbitrary `details`
- * payload: `CustomMessage<T = unknown>` allows primitives and arrays, and an
- * object spread would coerce them into character-keyed records, desyncing the
- * model-facing message from the journal. Only `undefined` or a plain record is
- * merged; any other payload is preserved untouched (the marker is simply not
- * persisted for that message, and recognition falls back to the customType
- * allowlists).
+ * custom message as a sibling of `details`: `CustomMessage<T = unknown>`
+ * allows primitives and arrays, so nesting the marker inside `details` would
+ * either coerce such payloads into character-keyed records or be unstickable.
+ * The extension-owned payload is never touched; #persistMessageEnd forwards
+ * the marker to the journal entry, and replay restores it.
  */
 export function stampCustomMessageMarker(message: CustomMessage, marker: "promptPrelude" | "userTurn"): void {
-	const details = message.details;
-	if (details !== undefined && !isRecord(details)) return;
-	message.details = { ...details, [marker]: true };
+	message[marker] = true;
 }
