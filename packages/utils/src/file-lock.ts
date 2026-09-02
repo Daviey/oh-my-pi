@@ -28,7 +28,8 @@ const DEFAULT_OPTIONS = {
 	retryDelayMs: 100,
 };
 
-function getLockPath(filePath: string): string {
+/** The OS-lock identity {@link withFileLock} derives for a guarded path. */
+export function lockPathFor(filePath: string): string {
 	return `${path.resolve(filePath)}.lock`;
 }
 
@@ -40,7 +41,7 @@ function tryAcquireLock(lockPath: string): NativeFileLock | null {
 /** Acquire an exclusive lease; callers must release it when their operation ends. */
 export async function acquireFileLock(filePath: string, options: FileLockOptions = {}): Promise<FileLockHandle> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const lockPath = getLockPath(filePath);
+	const lockPath = lockPathFor(filePath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
 		opts.signal?.throwIfAborted();
@@ -75,7 +76,7 @@ export type FileLockHandle = NativeFileLock;
  * than blocking.
  */
 export function tryAcquireFileLock(filePath: string): NativeFileLock | null {
-	return tryAcquireLock(getLockPath(filePath));
+	return tryAcquireLock(lockPathFor(filePath));
 }
 
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
@@ -108,5 +109,5 @@ export function withFileLockSync<T>(filePath: string, fn: () => T, options: File
  */
 export const __internalsForTesting = {
 	tryAcquireLock,
-	getLockPath,
+	getLockPath: lockPathFor,
 };
