@@ -423,7 +423,7 @@ import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./ses
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost, type XdevMountNoticeDetails } from "./session-tools";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
-(address codex round 50: persisted prelude ownership, complete root rollback delta)
+(fix: wire the revived session through post-revival setup after upstream rebase)
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
