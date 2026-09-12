@@ -809,11 +809,17 @@ const usageSegment: StatusLineSegment = {
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
+			// Prefer live interpolation from the absolute reset timestamp so the
+			// countdown stays correct between 5-min usage re-polls.
+			const minutes =
+				u.fiveHour.resetsAt !== undefined
+					? Math.max(0, Math.round((u.fiveHour.resetsAt - Date.now()) / 60_000))
+					: u.fiveHour.resetMinutes;
 			const reset =
-				u.fiveHour.resetMinutes !== undefined
+				minutes !== undefined
 					? theme.fg(
 							"muted",
-							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`,
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(minutes, "m")})`,
 						)
 					: "";
 			parts.push(`5h ${pctText}${reset}`);
@@ -821,11 +827,17 @@ const usageSegment: StatusLineSegment = {
 		if (u.daily) {
 			const pct = u.daily.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
+			// Prefer live interpolation from the absolute reset timestamp so the
+			// countdown stays correct between 5-min usage re-polls.
+			const minutes =
+				u.daily.resetsAt !== undefined
+					? Math.max(0, Math.round((u.daily.resetsAt - Date.now()) / 60_000))
+					: u.daily.resetMinutes;
 			const reset =
-				u.daily.resetMinutes !== undefined
+				minutes !== undefined
 					? theme.fg(
 							"muted",
-							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.daily.resetMinutes, "m")})`,
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(minutes, "m")})`,
 						)
 					: "";
 			parts.push(`1d ${pctText}${reset}`);
@@ -833,11 +845,17 @@ const usageSegment: StatusLineSegment = {
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
+			// Prefer live interpolation from the absolute reset timestamp so the
+			// countdown stays correct between 5-min usage re-polls.
+			const hours =
+				u.sevenDay.resetsAt !== undefined
+					? Math.max(0, Math.round((u.sevenDay.resetsAt - Date.now()) / 3_600_000))
+					: u.sevenDay.resetHours;
 			const reset =
-				u.sevenDay.resetHours !== undefined
+				hours !== undefined
 					? theme.fg(
 							"muted",
-							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`,
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(hours, "h")})`,
 						)
 					: "";
 			parts.push(`7d ${pctText}${reset}`);
@@ -848,11 +866,17 @@ const usageSegment: StatusLineSegment = {
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
 			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.floor(pct)}`)}%`);
+			// Prefer live interpolation from the absolute reset timestamp so the
+			// countdown stays correct between 5-min usage re-polls.
+			const hours =
+				u.monthly.resetsAt !== undefined
+					? Math.max(0, Math.round((u.monthly.resetsAt - Date.now()) / 3_600_000))
+					: u.monthly.resetHours;
 			const reset =
-				u.monthly.resetHours !== undefined
+				hours !== undefined
 					? theme.fg(
 							"muted",
-							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.monthly.resetHours, "h")})`,
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(hours, "h")})`,
 						)
 					: "";
 			parts.push(`mo ${pctText}${reset}`);

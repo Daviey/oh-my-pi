@@ -477,15 +477,16 @@ export class StatusLineComponent implements Component {
 	// Provider usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
 		tier?: string;
-		fiveHour?: { percent: number; resetMinutes?: number };
-		daily?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-		monthly?: { percent: number; resetHours?: number };
+		fiveHour?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		daily?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		sevenDay?: { percent: number; resetHours?: number; resetsAt?: number };
+		monthly?: { percent: number; resetHours?: number; resetsAt?: number };
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
 	#usageStartTimer: Timer | null = null;
+	#usageTickTimer: Timer | null = null;
 	// A timed-out request may still resolve. Its result remains eligible only
 	// until a newer request has applied.
 	#usageRefreshSequence = 0;
@@ -808,6 +809,7 @@ export class StatusLineComponent implements Component {
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
+		this.#stopUsageTickTimer();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
@@ -909,6 +911,34 @@ export class StatusLineComponent implements Component {
 		this.#brandFadeTimer = undefined;
 	}
 
+	/**
+	 * While cached usage carries absolute reset timestamps, a slow ticker keeps
+	 * the interpolated countdown honest between agent events (idle sessions
+	 * render nothing else). 30s granularity matches the minute-resolution text.
+	 */
+	#syncUsageTickTimer(): void {
+		const hasLiveReset =
+			this.#cachedUsage !== null &&
+			(this.#cachedUsage.fiveHour?.resetsAt !== undefined ||
+				this.#cachedUsage.daily?.resetsAt !== undefined ||
+				this.#cachedUsage.sevenDay?.resetsAt !== undefined ||
+				this.#cachedUsage.monthly?.resetsAt !== undefined);
+		if (hasLiveReset && !this.#disposed) {
+			this.#usageTickTimer ??= setInterval(() => {
+				this.invalidate();
+				this.#onBranchChange?.();
+			}, 30_000);
+			return;
+		}
+		this.#stopUsageTickTimer();
+	}
+
+	#stopUsageTickTimer(): void {
+		if (!this.#usageTickTimer) return;
+		clearInterval(this.#usageTickTimer);
+		this.#usageTickTimer = null;
+	}
+
 	#clearUsageStartTimer(): void {
 		if (!this.#usageStartTimer) return;
 		clearTimeout(this.#usageStartTimer);
@@ -932,6 +962,7 @@ export class StatusLineComponent implements Component {
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
 		this.#cachedUsage = null;
+		this.#stopUsageTickTimer();
 		this.#usageFetchedAt = 0;
 		this.#usageInFlight = false;
 		this.#contextUsageCache = undefined;
@@ -1390,6 +1421,7 @@ export class StatusLineComponent implements Component {
 		const usageContextKey = this.#getUsageContextKey(session);
 		if (this.#cachedUsageContextKey !== usageContextKey) {
 			this.#cachedUsage = null;
+			this.#stopUsageTickTimer();
 			this.#usageFetchedAt = 0;
 			this.#cachedUsageContextKey = usageContextKey;
 		}
@@ -1450,6 +1482,7 @@ export class StatusLineComponent implements Component {
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
 		const usageChanged = this.#cachedUsage !== normalized;
 		this.#cachedUsage = normalized;
+		this.#syncUsageTickTimer();
 		this.#usageFetchedAt = Date.now();
 		// Usage fetch is async; without a repaint the top border stays blank until
 		// some unrelated event (git resolve, keystroke, …) rebuilds it.
@@ -1559,10 +1592,10 @@ export class StatusLineComponent implements Component {
 		context: { provider?: string; modelId?: string; identity?: OAuthAccountIdentity },
 	): {
 		tier?: string;
-		fiveHour?: { percent: number; resetMinutes?: number };
-		daily?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-		monthly?: { percent: number; resetHours?: number };
+		fiveHour?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		daily?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		sevenDay?: { percent: number; resetHours?: number; resetsAt?: number };
+		monthly?: { percent: number; resetHours?: number; resetsAt?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		const now = Date.now();
@@ -1681,31 +1714,29 @@ export class StatusLineComponent implements Component {
 			return 3;
 		};
 		for (const candidate of selectedGroup.candidates) {
+			const resetsAt =
+				typeof candidate.resetsAt === "number" && Number.isFinite(candidate.resetsAt)
+					? candidate.resetsAt
+					: undefined;
 			if (candidate.windowClass === "5h" && !fiveHour) {
 				fiveHour = {
 					percent: candidate.fraction * 100,
-					resetMinutes:
-						typeof candidate.resetsAt === "number"
-							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
-							: undefined,
+					resetMinutes: resetsAt !== undefined ? Math.max(0, Math.round((resetsAt - now) / 60_000)) : undefined,
+					resetsAt,
 				};
 			}
 			if (candidate.windowClass === "daily" && !daily) {
 				daily = {
 					percent: candidate.fraction * 100,
-					resetMinutes:
-						typeof candidate.resetsAt === "number"
-							? Math.max(0, Math.round((candidate.resetsAt - now) / 60_000))
-							: undefined,
+					resetMinutes: resetsAt !== undefined ? Math.max(0, Math.round((resetsAt - now) / 60_000)) : undefined,
+					resetsAt,
 				};
 			}
 			if (candidate.windowClass === "7d" && !sevenDay) {
 				sevenDay = {
 					percent: candidate.fraction * 100,
-					resetHours:
-						typeof candidate.resetsAt === "number"
-							? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))
-							: undefined,
+					resetHours: resetsAt !== undefined ? Math.max(0, Math.round((resetsAt - now) / 3_600_000)) : undefined,
+					resetsAt,
 				};
 			}
 			if (candidate.windowClass === "monthly") {
@@ -1713,10 +1744,8 @@ export class StatusLineComponent implements Component {
 				if (priority < monthlyPriority) {
 					monthly = {
 						percent: candidate.fraction * 100,
-						resetHours:
-							typeof candidate.resetsAt === "number"
-								? Math.max(0, Math.round((candidate.resetsAt - now) / 3_600_000))
-								: undefined,
+						resetHours: resetsAt !== undefined ? Math.max(0, Math.round((resetsAt - now) / 3_600_000)) : undefined,
+						resetsAt,
 					};
 					monthlyPriority = priority;
 				}
