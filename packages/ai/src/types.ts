@@ -1098,6 +1098,17 @@ export interface ContextSnapshot {
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
 }
+export interface RoutingReport {
+	requested: string;
+	route: string;
+	reason: string;
+	method: string;
+	failovers: {
+		provider: string;
+		reason: string;
+	}[];
+}
+(ai: harvest attribution and model echo; tui: routing-aware served-model marker)
 
 export interface AssistantMessage {
 	role: "assistant";
@@ -1115,6 +1126,7 @@ export interface AssistantMessage {
 	model: string;
 	/** Stored credential row that produced this turn; absent for external or unknown keys. */
 	credentialId?: number;
+(ai: harvest attribution and model echo; tui: routing-aware served-model marker)
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
@@ -1167,6 +1179,7 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
+(ai: harvest attribution and model echo; tui: routing-aware served-model marker)
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds

@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, RoutingReport } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { MessageDividerComponent } from "../chrome/message-divider";
 import { theme } from "../theme";
@@ -13,6 +13,7 @@ export interface ServedModelMismatch {
 	provider: string;
 	/** Upstream host the provider routed to, when it reported one (OpenRouter's `provider`). */
 	upstreamProvider?: string;
+	routingReport?: RoutingReport;
 }
 
 /**
@@ -31,7 +32,17 @@ export function detectServedModelMismatch(message: AssistantMessage): ServedMode
 	if (!served || served === message.model) return undefined;
 	const requested = classifyModel(message.provider, message.model, { lenient: true });
 	const actual = classifyModel(message.provider, served, { lenient: true });
-	if (requested.class === "unknown" || actual.class === "unknown") return undefined;
+	if (!actual) return undefined;
+	if (requested.class === "unknown" && actual.class !== "unknown") {
+		return {
+			requested: message.model,
+			served,
+			provider: message.provider,
+			...(message.upstreamProvider ? { upstreamProvider: message.upstreamProvider } : {}),
+			...(message.routingReport ? { routingReport: message.routingReport } : {}),
+		};
+	}
+	if (requested.class === "unknown") return undefined;
 	if (
 		requested.class === actual.class &&
 		requested.family === actual.family &&
@@ -44,6 +55,7 @@ export function detectServedModelMismatch(message: AssistantMessage): ServedMode
 		served,
 		provider: message.provider,
 		...(message.upstreamProvider ? { upstreamProvider: message.upstreamProvider } : {}),
+		...(message.routingReport ? { routingReport: message.routingReport } : {}),
 	};
 }
 
@@ -81,7 +93,14 @@ export class ServedModelMarkerComponent extends MessageDividerComponent {
 			label: () => {
 				const dot = theme.sep.dot.trim();
 				const via = info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider;
-				return `${theme.status.warning} served ${info.served} ${dot} requested ${info.requested} ${dot} via ${via}`;
+				let s = `${theme.status.warning} served ${info.served} ${dot} requested ${info.requested} ${dot} via ${via}`;
+				if (info.routingReport) {
+					s += ` ${dot} ${info.routingReport.route}/${info.routingReport.reason}`;
+					if (info.routingReport.failovers && info.routingReport.failovers.length > 0) {
+						s += ` (${info.routingReport.failovers.map(f => f.provider).join(",")}-failed)`;
+					}
+				}
+				return s;
 			},
 			labelColor: "warning",
 			ruleColor: "dim",

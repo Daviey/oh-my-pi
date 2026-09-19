@@ -118,7 +118,31 @@ import {
 	NON_VISION_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
 
+import type { RoutingReport } from "../types";
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
+
+function parseRoutingReport(report: unknown, requested: string): RoutingReport | undefined {
+	if (typeof report !== "object" || report === null) return undefined;
+	const r = report as Record<string, unknown>;
+	if (typeof r.route !== "string" || typeof r.reason !== "string") return undefined;
+	return {
+		requested,
+		route: r.route,
+		reason: r.reason,
+		method: typeof r.method === "string" ? r.method : "default",
+		failovers: Array.isArray(r.failovers)
+			? r.failovers.map((f: unknown): { provider: string; reason: string } => {
+					if (f && typeof f === "object" && "provider" in f && "reason" in f) {
+						return {
+							provider: typeof f.provider === "string" ? f.provider : "unknown",
+							reason: typeof f.reason === "string" ? f.reason : "unknown",
+						};
+					}
+					return { provider: "unknown", reason: "unknown" };
+			  })
+			: [],
+	};
+}
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
@@ -1247,28 +1271,6 @@ const streamOpenAICompletionsOnce = (
 				if (inBand) throw inBand;
 				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
 				if (streamError) throw streamError;
-function parseRoutingReport(report: unknown, requested: string): RoutingReport | undefined {
-	if (typeof report !== "object" || report === null) return undefined;
-	const r = report as Record<string, unknown>;
-	if (typeof r.route !== "string" || typeof r.reason !== "string") return undefined;
-	return {
-		requested,
-		route: r.route,
-		reason: r.reason,
-		method: typeof r.method === "string" ? r.method : "default",
-		failovers: Array.isArray(r.failovers)
-			? r.failovers.map((f: unknown): { provider: string; reason: string } => {
-					if (f && typeof f === "object" && "provider" in f && "reason" in f) {
-						return {
-							provider: typeof f.provider === "string" ? f.provider : "unknown",
-							reason: typeof f.reason === "string" ? f.reason : "unknown",
-						};
-					}
-					return { provider: "unknown", reason: "unknown" };
-			  })
-			: [],
-	};
-}
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1278,33 +1280,10 @@ function parseRoutingReport(report: unknown, requested: string): RoutingReport |
 				// provider that actually served the request via a top-level `provider`
 				// field present on every chunk. Capture the first non-empty value so
 				// callers can attribute routing without re-parsing the raw stream.
-				// Routers (coxswain) additionally report a top-level `routing` object
-				// (requested/route/reason/class/method/failovers) explaining the
-				// selection; it rides outside choices[] so it never enters context.
 				if (!output.upstreamProvider) {
 					const upstreamProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
-					const echoed = chunk.model;
-					if (typeof echoed === "string" && echoed.length > 0 && echoed !== wireModelId) {
-						output.upstreamModel = echoed;
-					}
-				if (!output.routingReport) {
-					const routingReport = parseRoutingReport(
-						(chunk as ProviderAttributedChatCompletionChunk).routing,
-						activeRequestParams?.model ?? params.model,
-					);
-					if (routingReport) output.routingReport = routingReport;
-				}
-				// The chunk's `model` field echoes the model that actually served the
-				// request. A router (coxswain route aliases) resolves the requested
-				// id to a concrete upstream model, so a differing echo names the real
-				// served model — the same role as OpenRouter's signed-reasoning
-				// recovery. OpenAI itself echoes the requested id, which the
-				// mismatch marker treats as no-notice.
-				if (!output.upstreamModel) {
-					const echoed = chunk.model;
-					if (typeof echoed === "string" && echoed.length > 0 && echoed !== wireModelId) {
-						output.upstreamModel = echoed;
-					}
+					output.upstreamProvider =
+						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
 				if (chunk.usage) {
@@ -1319,7 +1298,25 @@ function parseRoutingReport(report: unknown, requested: string): RoutingReport |
 					if (streamFinishedAt !== undefined && sawUsagePayload) break;
 					continue;
 				}
+				output.responseId ||= chunk.id;
 
+				if (!output.upstreamProvider) {
+					const upstreamProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
+					output.upstreamProvider =
+						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
+				}
+				if (!output.routingReport) {
+					const routingReport = parseRoutingReport(
+						(chunk as ProviderAttributedChatCompletionChunk).routing,
+						activeRequestParams?.model ?? "",
+					);
+					if (routingReport) output.routingReport = routingReport;
+				}
+				const wireModelId = activeRequestParams?.model;
+				const echoed = chunk.model;
+				if (wireModelId !== undefined && typeof echoed === "string" && echoed.length > 0 && echoed !== wireModelId) {
+					output.upstreamModel = echoed;
+				}
 				if (!chunk.usage) {
 					const choiceUsage = (choice as OpenAICompletionsChoiceUsage).usage;
 					if (typeof choiceUsage === "object" && choiceUsage !== null) {
