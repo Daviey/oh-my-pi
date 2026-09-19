@@ -474,7 +474,7 @@ export interface SessionMaintenanceHost {
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
-	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }>;
+	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number; tokensFreed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,
 		options?: SessionHandoffOptions,
@@ -551,6 +551,9 @@ function countMessageImages(message: AgentMessage): number {
 			return count;
 	}
 }
+/** Fixed per-image token estimate — mirrors the tokenizer's charge for inline image blocks. */
+const IMAGE_TOKEN_ESTIMATE = 1200;
+
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
@@ -797,7 +800,7 @@ export class SessionMaintenance {
 	 * No-op when the branch carries no strippable images; returns
 	 * `{ removed: 0 }` and skips the disk rewrite.
 	 */
-	async dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }> {
+	async dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number; tokensFreed: number }> {
 		const keepRecent = Math.max(0, opts?.keepRecent ?? 1);
 		const branchEntries = this.#host.sessionManager.getBranch();
 		// Identify the keep-set first: the last `keepRecent` entries (walking
@@ -840,16 +843,15 @@ export class SessionMaintenance {
 			}
 		}
 		if (removed === 0) {
-			return { removed: 0 };
+			return { removed: 0, tokensFreed: 0 };
 		}
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		return { removed };
+		return { removed, tokensFreed: removed * IMAGE_TOKEN_ESTIMATE };
 	}
-
 
 	/**
 	 * Surgically reduce context by dropping heavy content ("shake").
@@ -3208,9 +3210,9 @@ export class SessionMaintenance {
 		// weight in every subsequent prompt. Cheap bail (no strippable images
 		// behind the newest one → zero work, no rewrite); same every-turn,
 		// pre-threshold slot as the stale-result pass.
-		if (!this.#usesExperimentalContextManagement()) {
-			await this.dropImages();
-		}
+		const { stripStaleImages } = this.#host.settings.getGroup("compaction");
+		const stripResult =
+			stripStaleImages && !this.#usesExperimentalContextManagement() ? await this.dropImages() : undefined;
 
 		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		if (
@@ -3223,9 +3225,10 @@ export class SessionMaintenance {
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = this.#usesExperimentalContextManagement() ? undefined : await this.#pruneToolOutputs();
-		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
+		const maintenanceTokensFreed =
+			(supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0) + (stripResult?.tokensFreed ?? 0);
 		// not just an error-specific one; alias it locally so the threshold intent
 		// reads clearly (#3412 review).
 		const assistantPredatesCompaction = errorIsFromBeforeCompaction;

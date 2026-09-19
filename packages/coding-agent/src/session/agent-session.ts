@@ -5955,7 +5955,7 @@ export class AgentSession implements SettingsScope {
 		return this.#maintenance.speculationState;
 	}
 	/** Strip image content from older messages (keeps the most recent image turn; `keepRecent: 0` strips all) and persist the rewrite. */
-	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }> {
+	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number; tokensFreed: number }> {
 		return this.#maintenance.dropImages(opts);
 	}
 
