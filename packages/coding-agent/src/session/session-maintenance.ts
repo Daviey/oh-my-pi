@@ -3203,6 +3203,14 @@ export class SessionMaintenance {
 		const supersedeResult = this.#usesExperimentalContextManagement()
 			? undefined
 			: await this.#pruneStaleToolResults();
+		// Auto recency-strip: older screenshots are already summarized by the
+		// assistant replies that followed them, so their pixel data is dead
+		// weight in every subsequent prompt. Cheap bail (no strippable images
+		// behind the newest one → zero work, no rewrite); same every-turn,
+		// pre-threshold slot as the stale-result pass.
+		if (!this.#usesExperimentalContextManagement()) {
+			await this.dropImages();
+		}
 
 		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		if (
