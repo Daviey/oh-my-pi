@@ -181,6 +181,49 @@ describe("AgentSession auto strip-stale-images", () => {
 		const live = session.agent.state.messages as Array<{ role: string; content: unknown }>;
 		expect(userImages(live)).toEqual([1]);
 	});
+
+		it("is a no-op when compaction.stripStaleImages is false", async () => {
+			// Drop the fixture session/manager to rebuild with different settings
+			await session.dispose();
+			authStorage.close();
+			await tempDir.remove();
+
+			tempDir = TempDir.createSync("@pi-strip-stale-images-off-");
+			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+			const modelRegistry = new ModelRegistry(authStorage);
+			sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!bundled) throw new Error("Expected built-in anthropic model to exist");
+			const agent = new Agent({
+				initialState: { model: bundled, systemPrompt: ["Test"], tools: [], messages: [] },
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"compaction.stripStaleImages": false,
+				}),
+				modelRegistry,
+			});
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "old" }, PNG_OLD],
+				timestamp: Date.now() - 100,
+			});
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "new" }, PNG_NEW],
+				timestamp: Date.now() - 50,
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			turnEnds();
+			await session.waitForIdle();
+
+			const live = session.agent.state.messages as Array<{ role: string; content: unknown }>;
+			expect(userImages(live)).toEqual([1, 1]);
+		});
 });
 
 type ImageContent = { type: "image"; data: string; mimeType: string };
