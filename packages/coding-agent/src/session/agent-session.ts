@@ -249,10 +249,10 @@ import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import {
 	getLatestTodoPhasesFromEntries,
-	type TodoPhase,
 	todoPhasesEqual,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../tools/todo";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
