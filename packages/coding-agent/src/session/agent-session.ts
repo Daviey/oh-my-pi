@@ -2104,7 +2104,7 @@ export class AgentSession implements SettingsScope {
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
-			dropImages: () => this.dropImages(),
+			dropImages: opts => this.dropImages(opts),
 			generateHandoffDocument: (customInstructions, options) =>
 				this.#handoff.generateDocument(customInstructions, options),
 			removeAssistantMessageFromActiveContext: message =>
@@ -5954,9 +5954,9 @@ export class AgentSession implements SettingsScope {
 	get compactionSpeculation(): "idle" | "running" | "armed" {
 		return this.#maintenance.speculationState;
 	}
-	/** Strip image content from the current branch and persist the rewrite. */
-	dropImages(): Promise<{ removed: number }> {
-		return this.#maintenance.dropImages();
+	/** Strip image content from older messages (keeps the most recent image turn; `keepRecent: 0` strips all) and persist the rewrite. */
+	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }> {
+		return this.#maintenance.dropImages(opts);
 	}
 
 	/** Reduce stored context with the selected shake strategy. */

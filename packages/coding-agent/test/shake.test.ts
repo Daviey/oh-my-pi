@@ -366,12 +366,18 @@ describe("AgentSession shake", () => {
 	});
 
 	describe("images", () => {
-		it("mirrors dropImages and reports the removed image count", async () => {
-			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+		it("keeps the most recent image turn and strips older ones (recency-strip)", async () => {
+			const pngA: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			const pngB: ImageContent = { type: "image", data: "iVBORw0KGg=", mimeType: "image/png" };
 			sessionManager.appendMessage({
 				role: "user",
-				content: [{ type: "text", text: "look" }, png],
+				content: [{ type: "text", text: "old screenshot" }, pngA],
 				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "new screenshot" }, pngB],
+				timestamp: Date.now() + 1,
 			});
 
 			const result = await session.shake("images");
@@ -379,8 +385,32 @@ describe("AgentSession shake", () => {
 			expect(result.mode).toBe("images");
 			expect(result.imagesDropped).toBe(1);
 			const branch = sessionManager.getBranch();
+			const userMsgs = branch.filter(
+				e => e.type === "message" && (e.message as { role?: string }).role === "user",
+			);
+			const contents = userMsgs.map(
+				e => (e as { message: { content: Array<{ type: string; text?: string }> } }).message.content,
+			);
+			// older turn: image stripped, surrounding text kept (no placeholder needed)
+			expect(contents[0].some(b => b.type === "text" && b.text === "old screenshot")).toBe(true);
+			// newest image-bearing turn: image kept pixel-for-pixel
+			expect(contents[1].some(b => b.type === "image")).toBe(true);
+		});
+
+		it("strips every image when keepRecent: 0 (dead-end rescue contract)", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now(),
+			});
+
+			const removed = await session.dropImages({ keepRecent: 0 });
+
+			expect(removed.removed).toBe(1);
+			const branch = sessionManager.getBranch();
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
-			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
+			const content = (userMsg as { message: { content: Array<{ type: string }> } }).message.content;
 			expect(content.some(b => b.type === "image")).toBe(false);
 		});
 	});

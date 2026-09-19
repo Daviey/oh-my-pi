@@ -474,7 +474,7 @@ export interface SessionMaintenanceHost {
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
-	dropImages(): Promise<{ removed: number }>;
+	dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,
 		options?: SessionHandoffOptions,
@@ -501,6 +501,56 @@ export interface SessionMaintenanceHost {
 	abortHandoff(): void;
 }
 
+/** Whether a branch entry would yield at least one stripped image block. */
+function entryHasImages(entry: SessionEntry): boolean {
+	if (entry.type === "message") {
+		return countMessageImages(entry.message) > 0;
+	}
+	if (entry.type === "custom_message") {
+		const content: unknown = entry.content;
+		return typeof content !== "string" && Array.isArray(content) && content.some(isImagePart);
+	}
+	return false;
+}
+
+function isImagePart(part: unknown): boolean {
+	return typeof part === "object" && part !== null && (part as { type?: unknown }).type === "image";
+}
+
+/** Count image blocks carried by an AgentMessage (same surfaces stripImagesFromMessage covers). */
+function countMessageImages(message: AgentMessage): number {
+	let count = 0;
+	switch (message.role) {
+		case "bashExecution":
+			return message.images?.length ?? 0;
+		case "user":
+		case "developer":
+		case "custom":
+		case "hookMessage":
+			if (typeof message.content !== "string" && Array.isArray(message.content)) {
+				for (const part of message.content) {
+					if (part.type === "image") count++;
+				}
+			}
+			return count;
+		case "toolResult": {
+			if (Array.isArray(message.content)) {
+				for (const part of message.content) {
+					if ((part as { type?: unknown })?.type === "image") count++;
+				}
+			}
+			const details = message.details as { images?: unknown } | null | undefined;
+			if (details && Array.isArray(details.images)) {
+				for (const candidate of details.images) {
+					if ((candidate as { type?: unknown })?.type === "image") count++;
+				}
+			}
+			return count;
+		}
+		default:
+			return count;
+	}
+}
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
@@ -727,21 +777,45 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Strip image content blocks from every message on the current branch and
-	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
+	 * Strip image content blocks from older messages on the current branch,
+	 * keeping the most recent `keepRecent` (default 1) image-bearing entries
+	 * intact — the "current" screenshot the model still needs to see pixel
+	 * data for. Older screenshots are already summarized by the assistant
+	 * replies that followed them, so their image blocks are dead weight in
+	 * every subsequent prompt.
+	 *
+	 * `keepRecent: 0` strips everything (the compaction dead-end rescue uses
+	 * this for maximum reclaim).
+	 *
+	 * Walks `SessionManager.getBranch()` in place — both
 	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
 	 * are mutated, then `rewriteEntries` durably commits the new shape. The
 	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
 	 * provider sessions caching message identity (Codex Responses) are torn
 	 * down to force a clean replay on the next turn.
 	 *
-	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
-	 * skips the disk rewrite.
+	 * No-op when the branch carries no strippable images; returns
+	 * `{ removed: 0 }` and skips the disk rewrite.
 	 */
-	async dropImages(): Promise<{ removed: number }> {
+	async dropImages(opts?: { keepRecent?: number }): Promise<{ removed: number }> {
+		const keepRecent = Math.max(0, opts?.keepRecent ?? 1);
 		const branchEntries = this.#host.sessionManager.getBranch();
+		// Identify the keep-set first: the last `keepRecent` entries (walking
+		// backwards) that would yield at least one stripped image.
+		const keep = new Set<unknown>();
+		if (keepRecent > 0) {
+			let kept = 0;
+			for (let i = branchEntries.length - 1; i >= 0 && kept < keepRecent; i--) {
+				const entry = branchEntries[i];
+				if (entryHasImages(entry)) {
+					keep.add(entry);
+					kept++;
+				}
+			}
+		}
 		let removed = 0;
 		for (const entry of branchEntries) {
+			if (keep.has(entry)) continue;
 			if (entry.type === "message") {
 				removed += stripImagesFromMessage(entry.message);
 				continue;
@@ -775,6 +849,7 @@ export class SessionMaintenance {
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
 	}
+
 
 	/**
 	 * Surgically reduce context by dropping heavy content ("shake").
@@ -3881,7 +3956,7 @@ export class SessionMaintenance {
 		if (signal.aborted) return false;
 		let imagesDropped = 0;
 		try {
-			imagesDropped = (await this.#host.dropImages()).removed;
+			imagesDropped = (await this.#host.dropImages({ keepRecent: 0 })).removed;
 			if (imagesDropped > 0) this.#host.rebaseAfterCompaction();
 		} catch (error) {
 			logger.warn("Dead-end image-drop rescue failed", {
