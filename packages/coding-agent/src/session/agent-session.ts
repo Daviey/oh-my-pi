@@ -236,8 +236,8 @@ import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint"
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { TRUNCATE_LENGTHS } from "../tools/render-utils";
-(address codex round 7: gapless repair claim, openWriter failure release, role/mode payload fidelity)
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render";
+(fix rebase splinters: stale render-utils import, splintered todo fns, revive entry sourcing + owner-policy clobber)
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
