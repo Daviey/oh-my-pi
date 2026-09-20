@@ -7,6 +7,13 @@ function turn(parts: {
 	served?: string;
 	provider?: string;
 	upstreamProvider?: string;
+	routingReport?: {
+		requested: string;
+		route: string;
+		reason: string;
+		method: string;
+		failovers: { provider: string; reason: string }[];
+	};
 }): AssistantMessage {
 	return {
 		role: "assistant",
@@ -16,6 +23,7 @@ function turn(parts: {
 		model: parts.model,
 		...(parts.served ? { upstreamModel: parts.served } : {}),
 		...(parts.upstreamProvider ? { upstreamProvider: parts.upstreamProvider } : {}),
+		...(parts.routingReport ? { routingReport: parts.routingReport } : {}),
 		usage: {
 			input: 0,
 			output: 0,
@@ -69,6 +77,33 @@ describe("detectServedModelMismatch", () => {
 
 	it("stays silent when no served id was recovered", () => {
 		expect(detectServedModelMismatch(turn({ model: "claude-fable-5-1" }))).toBeUndefined();
+	});
+	it("flags a route-alias request served by a known model (router substitution)", () => {
+		// Requested ids a router resolves to concrete models ("default", "smol")
+		// classify as unknown; that must not suppress the marker when the served
+		// model IS classifiable — the exact coxswain case.
+		const mismatch = detectServedModelMismatch(turn({ model: "default", served: "glm-5.3" }));
+		expect(mismatch).toBeDefined();
+		expect(mismatch?.requested).toBe("default");
+		expect(mismatch?.served).toBe("glm-5.3");
+	});
+
+	it("stays silent for route-alias requests with no recoverable served model", () => {
+		// Unverifiable served id + unknown requested: no evidence of substitution.
+		expect(detectServedModelMismatch(turn({ model: "smol", served: "numbat-v6-efforts-20-40-80-ab-prod" }))).toBeUndefined();
+	});
+
+	it("carries the router routing report into the mismatch", () => {
+		const report = {
+			requested: "default",
+			route: "default",
+			reason: "as-requested",
+			method: "default",
+			failovers: [{ provider: "mockA", reason: "quota" }],
+		};
+		const mismatch = detectServedModelMismatch(turn({ model: "default", served: "glm-5.3", routingReport: report }));
+		expect(mismatch?.routingReport).toEqual(report);
+		expect(mismatch?.routingReport?.failovers[0].provider).toBe("mockA");
 	});
 });
 

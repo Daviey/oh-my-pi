@@ -32,8 +32,10 @@ export function detectServedModelMismatch(message: AssistantMessage): ServedMode
 	if (!served || served === message.model) return undefined;
 	const requested = classifyModel(message.provider, message.model, { lenient: true });
 	const actual = classifyModel(message.provider, served, { lenient: true });
-	if (!actual) return undefined;
-	if (requested.class === "unknown" && actual.class !== "unknown") {
+	if (!actual || actual.class === "unknown") return undefined;
+	// Route alias (e.g. "default") is unknown to the catalog: the router
+	// resolved it to a concrete model, so a known served id IS the substitution.
+	if (requested.class === "unknown") {
 		return {
 			requested: message.model,
 			served,
@@ -42,7 +44,6 @@ export function detectServedModelMismatch(message: AssistantMessage): ServedMode
 			...(message.routingReport ? { routingReport: message.routingReport } : {}),
 		};
 	}
-	if (requested.class === "unknown") return undefined;
 	if (
 		requested.class === actual.class &&
 		requested.family === actual.family &&
