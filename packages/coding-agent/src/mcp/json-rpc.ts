@@ -11,7 +11,6 @@ import type { JsonRpcResponse } from "./types";
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
 
-// SENSITIVE_QUERY_PARAM imported from pi-utils (single source; includes `sig`).
 
 /**
  * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
