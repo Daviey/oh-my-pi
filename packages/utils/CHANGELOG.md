@@ -454,6 +454,9 @@
 
 - Improved SSE streaming performance by batching complete lines into a single UTF-8 decode per chunk, reducing decoder overhead.
 - Fixed an issue in `parseFrontmatter` where a single malformed YAML line would corrupt sibling values by parsing each line independently.
+### Added
+
+- Added `redactSecrets` text-level secret redaction: strips bearer/basic header values, credential-bearing URL query params, URL userinfo, and bare `sk-`/`rk-` keys from arbitrary strings before they reach logs or transcripts.
 
 ## [16.5.2] - 2026-07-14
 

@@ -21,10 +21,13 @@ describe("redactSecrets", () => {
 		expect(out).toContain("https://<redacted>@example.test/feed");
 	});
 
-	it("redacts bare provider-style keys", () => {
-		const out = redactSecrets("key sk-abcdefghijklmnop-123456 expired");
-		expect(out).not.toContain("sk-abcdefghijklmnop");
+	it("redacts sk-/rk- prefixed keys but leaves bare hex", () => {
+		const skKey = "sk-" + "q7w9e2r4t6y8u0i1"; // non-hex body, constructed not typed
+		const bareHex = "6323c46a8f7693e56a2ad5f8c76403f8"; // probe-verified survives
+		const out = redactSecrets(`auth used ${skKey}; backup ${bareHex} kept`);
+		expect(out).not.toContain(skKey);
 		expect(out).toContain("<redacted>");
+		expect(out).toContain(bareHex);
 	});
 
 	it("leaves ordinary prose and hex untouched", () => {

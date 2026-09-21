@@ -204,6 +204,7 @@ export async function callMCP(
 			url: redactUrlForLog(url),
 			method,
 			error: error instanceof Error ? error.message : String(error),
+			responseText: redactSecrets(text.slice(0, 500)),
 		});
 		throw options?.onParseError?.(error) ?? error;
 	}
