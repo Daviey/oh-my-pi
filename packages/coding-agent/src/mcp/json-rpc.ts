@@ -5,7 +5,7 @@
  * without maintaining persistent connections.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseEvents, redactSecrets } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
@@ -190,7 +190,9 @@ export async function callMCP(
 		if (options?.onHttpError) {
 			throw options.onHttpError(response, await response.text());
 		}
-		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
+		// statusText can echo reason phrases with embedded credentials; the thrown
+		// error reaches UI status lines, so pass it through the text-level barrier.
+		const errorMsg = redactSecrets(`MCP request failed: ${response.status} ${response.statusText}`);
 		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
 		throw new Error(errorMsg);
 	}
