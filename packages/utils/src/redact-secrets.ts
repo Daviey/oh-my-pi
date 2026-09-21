@@ -7,7 +7,8 @@
  * `coding-agent/mcp/json-rpc.ts#redactUrlForLog`; this is the text-level barrier.
  */
 
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth|sig/i;
+/** Param names whose URL query values are credentials (single source for URL + text redaction). */
+export const SENSITIVE_QUERY_PARAM = /key|token|secret|auth|sig/i;
 
 const REDACTIONS: Array<[RegExp, string]> = [
 	// Authorization headers (incl. leaked into error text)

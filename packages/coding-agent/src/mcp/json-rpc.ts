@@ -5,13 +5,13 @@
  * without maintaining persistent connections.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, readSseEvents, redactSecrets } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseEvents, redactSecrets, SENSITIVE_QUERY_PARAM } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
 
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
+// SENSITIVE_QUERY_PARAM imported from pi-utils (single source; includes `sig`).
 
 /**
  * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
@@ -200,6 +200,7 @@ export async function callMCP(
 	try {
 		return await readMcpJsonRpcResponse(response, body.id, signal);
 	} catch (error) {
+		const text = await response.text().catch(() => "");
 		logger.error("Failed to parse MCP response", {
 			url: redactUrlForLog(url),
 			method,
