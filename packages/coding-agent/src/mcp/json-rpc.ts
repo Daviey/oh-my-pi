@@ -11,7 +11,6 @@ import type { JsonRpcResponse } from "./types";
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
 
-
 /**
  * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
  * requests never write secrets to the persistent log file.
