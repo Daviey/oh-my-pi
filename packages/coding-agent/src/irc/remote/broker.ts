@@ -131,18 +131,52 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 
 	const previousUmask = process.umask(0o077);
 	const server = net.createServer();
+	let pathServer: net.Server | undefined;
 	try {
-		server.listen(socketPath);
-		const listening = Promise.withResolvers<void>();
-		server.once("listening", listening.resolve);
-		server.once("error", listening.reject);
-		await listening.promise;
+		// Bind on an ABSTRACT namespace first (Linux: no filesystem name, no
+		// unlink race), then materialize the filesystem path only once we own
+		// the singleton slot. The abstract bind is the true mutual exclusion:
+		// a second broker's abstract listen() fails immediately, so the
+		// unlink-listen window that let two brokers coexist on one path is gone.
+		// Single abstract-namespace bind IS the singleton: one listen() only,
+		// under a name derived from the socket path. A second broker's listen
+		// on the same abstract name fails immediately — no unlink/rebind window.
+		// Clients keep using the filesystem path, which we materialize as a
+		// SYMLINK to the abstract name via /proc/net/unix-independent trick:
+		// instead, bind the filesystem path on a SECOND server instance only
+		// after winning the abstract slot, and relay accepts from it to the
+		// same handler set.
+		const abstractName = `\0omp-hub-broker:${socketPath}`;
+		try {
+			server.listen(abstractName);
+			const abstractBound = Promise.withResolvers<void>();
+			server.once("listening", abstractBound.resolve);
+			server.once("error", abstractBound.reject);
+			await abstractBound.promise;
+		} catch {
+			// Abstract name taken → a broker is live (even if its filesystem
+			// socket was unlinked mid-race). probeLive said dead, but the race
+			// window proves otherwise; stand down.
+			logger.debug("hub broker: abstract slot owned; exiting", { socketPath });
+			return;
+		}
+		// Filesystem admission socket on its own server; clients never see the
+		// abstract name. Same-uid enforcement and framing are per-connection.
+		pathServer = net.createServer();
+		try {
+			fs.unlinkSync(socketPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		pathServer.listen(socketPath);
 	} finally {
 		process.umask(previousUmask);
 	}
 	fs.chmodSync(socketPath, HUB_SOCKET_MODE);
 	options.onListening?.();
 	logger.debug("hub broker: listening", { socketPath });
+
+
 
 	const connections = new Set<ClientConn>();
 	// Keyed by project + agentId: agent ids are only unique within a process
@@ -319,7 +353,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 	}
 
 	const resolvePeerUid = options.peerUid ?? peerUid;
-	server.on("connection", socket => {
+	const onConnection = (socket: net.Socket) => {
 		const uid = resolvePeerUid(socket);
 		if (uid !== undefined && uid !== process.getuid?.()) {
 			logger.debug("hub broker: refusing cross-uid connection", { uid, expected: process.getuid?.() });
@@ -343,8 +377,9 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 		});
 		socket.on("close", () => dropConnection(conn));
 		socket.on("error", () => socket.destroy());
-	});
-
+	};
+	server.on("connection", onConnection);
+	if (pathServer) pathServer.on("connection", onConnection);
 	server.on("error", error => {
 		logger.debug("hub broker: server error", { socketPath, error: String(error) });
 	});

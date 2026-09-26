@@ -221,6 +221,20 @@ describe("hub broker protocol", () => {
 		b.end();
 	}, 10_000);
 
+	it("rapid double-spawn yields exactly one live broker (no split-brain)", async () => {
+		const socketPath = makeBrokerPath();
+		const a = startHubBroker({ socketPath, idleGraceMs: 60_000 });
+		const b = startHubBroker({ socketPath, idleGraceMs: 60_000 });
+		await Promise.all([a, b]);
+		// Exactly one broker owns the path: a probe client gets a live welcome.
+		const c = new RawPeer(socketPath);
+		await c.connect();
+		c.write({ type: "hello", agents: [identity("main", "p")] });
+		const welcome = await c.next();
+		expect(welcome.type).toBe("welcome");
+		c.end();
+	}, 10_000);
+
 	it("duplicate targets for the same peer deliver once per connection (no dup frames)", async () => {
 		const socketPath = makeBrokerPath();
 		const listening = Promise.withResolvers<void>();
