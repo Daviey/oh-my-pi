@@ -90,7 +90,9 @@ describe("detectServedModelMismatch", () => {
 
 	it("stays silent for route-alias requests with no recoverable served model", () => {
 		// Unverifiable served id + unknown requested: no evidence of substitution.
-		expect(detectServedModelMismatch(turn({ model: "smol", served: "numbat-v6-efforts-20-40-80-ab-prod" }))).toBeUndefined();
+		expect(
+			detectServedModelMismatch(turn({ model: "smol", served: "numbat-v6-efforts-20-40-80-ab-prod" })),
+		).toBeUndefined();
 	});
 
 	it("carries the router routing report into the mismatch", () => {

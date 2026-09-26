@@ -4,8 +4,8 @@ import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, Usag
 import type { getOAuthProviders as GetOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { Component, OverlayHandle, ResizeScrollbackMode, SgrMouseEvent } from "@oh-my-pi/pi-tui";
-import { Container, Loader, type SelectItem, SelectList, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
+import type { Component, OverlayHandle, SgrMouseEvent } from "@oh-my-pi/pi-tui";
+import { Container, Loader, type SelectItem, SelectList, Spacer, Text } from "@oh-my-pi/pi-tui";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -13,7 +13,6 @@ import {
 	normalizePathForComparison,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
-(fix(tui): inline RevertTurnSelectorComponent into SelectorController)
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,

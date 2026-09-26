@@ -109,8 +109,7 @@ import {
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
-(address codex round 55: count collaborative prompts as user turns)
+import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -235,9 +234,7 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render";
-(fix rebase splinters: stale render-utils import, splintered todo fns, revive entry sourcing + owner-policy clobber)
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -247,11 +244,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import {
-	getLatestTodoPhasesFromEntries,
-	todoPhasesEqual,
-	USER_TODO_EDIT_CUSTOM_TYPE,
-} from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, todoPhasesEqual, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -421,9 +414,8 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost, type XdevMountNoticeDetails } from "./session-tools";
+import { SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
-(fix: wire the revived session through post-revival setup after upstream rebase)
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";

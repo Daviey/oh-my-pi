@@ -213,7 +213,6 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runWal: selected ? flags.wal === true : read(cfgGcWal),
 		runUndoTails: selected ? flags.undoTails === true : false,
 		keepUndoTails: Math.max(0, flags.keepUndoTails ?? 1),
-(feat(gc): prune off-branch user-undo tails)
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			read(cfgGcColdArchiveAfterDays),

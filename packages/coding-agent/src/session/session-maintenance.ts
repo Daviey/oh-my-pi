@@ -3210,7 +3210,7 @@ export class SessionMaintenance {
 		// weight in every subsequent prompt. Cheap bail (no strippable images
 		// behind the newest one → zero work, no rewrite); same every-turn,
 		// pre-threshold slot as the stale-result pass.
-		const { stripStaleImages } = this.#host.settings.getGroup("compaction");
+		const { stripStaleImages } = cfgCompaction.get(this.#host.settings);
 		const stripResult =
 			stripStaleImages && !this.#usesExperimentalContextManagement() ? await this.dropImages() : undefined;
 

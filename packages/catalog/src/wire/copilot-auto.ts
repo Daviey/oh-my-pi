@@ -150,7 +150,11 @@ export async function classifyCopilotIntent(
 			signal: controller.signal,
 		});
 		if (!response.ok) return null;
-		const data = (await response.json()) as { chosen_model?: string; routing_method?: string; reasoning_bucket?: string };
+		const data = (await response.json()) as {
+			chosen_model?: string;
+			routing_method?: string;
+			reasoning_bucket?: string;
+		};
 		if (!data.chosen_model) return null;
 		return {
 			chosenModel: data.chosen_model,
@@ -174,7 +178,7 @@ export function lastUserPrompt(messages: ReadonlyArray<{ role?: string; content?
 		if (Array.isArray(c)) {
 			// OpenAI-style content parts.
 			const text = c
-				.map(part => (typeof part === "string" ? part : part?.text ?? ""))
+				.map(part => (typeof part === "string" ? part : (part?.text ?? "")))
 				.filter(Boolean)
 				.join(" ");
 			if (text) return text.slice(0, 2000);

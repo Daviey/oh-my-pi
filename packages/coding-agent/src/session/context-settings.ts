@@ -299,6 +299,18 @@ export const cfgCompactionDropUseless = register({
 	},
 });
 
+export const cfgCompactionStripStaleImages = register({
+	id: "compaction.stripStaleImages",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Strip Stale Images",
+		description: "Per-turn: drop screenshots older than the newest image turn (old ones already summarized)",
+	},
+});
+
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
@@ -320,6 +332,7 @@ export const cfgCompaction = combine({
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
+	stripStaleImages: cfgCompactionStripStaleImages,
 });
 
 /** Configured compaction policy ({@link cfgCompaction}). */

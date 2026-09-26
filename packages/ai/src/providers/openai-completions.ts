@@ -139,7 +139,7 @@ function parseRoutingReport(report: unknown, requested: string): RoutingReport |
 						};
 					}
 					return { provider: "unknown", reason: "unknown" };
-			  })
+				})
 			: [],
 	};
 }
@@ -1314,7 +1314,12 @@ const streamOpenAICompletionsOnce = (
 				}
 				const wireModelId = activeRequestParams?.model;
 				const echoed = chunk.model;
-				if (wireModelId !== undefined && typeof echoed === "string" && echoed.length > 0 && echoed !== wireModelId) {
+				if (
+					wireModelId !== undefined &&
+					typeof echoed === "string" &&
+					echoed.length > 0 &&
+					echoed !== wireModelId
+				) {
 					output.upstreamModel = echoed;
 				}
 				if (!chunk.usage) {

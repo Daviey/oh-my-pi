@@ -91,7 +91,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, `auth-${authStorages.length}.db`));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		// Scoped to the test temp dir so local:// artifact URLs (plan files)
 		// resolve inside the sandbox instead of the real session store.
 		sessionManager = SessionManager.inMemory(tempDir);
@@ -148,7 +148,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, `auth-${sessionFileName}.db`));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, sessionFileName));
 		session = new AgentSession({
@@ -176,7 +176,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-plan-undo.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		const sessionFile = path.join(tempDir, "plan-undo.jsonl");
 		await sessionManager.setSessionFile(sessionFile);
@@ -1155,7 +1155,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-tree-undo.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, "tree-undo.jsonl"));
 		session = new AgentSession({
@@ -1317,7 +1317,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-before-tree.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, "before-tree.jsonl"));
 		session = new AgentSession({
@@ -1386,7 +1386,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-redo-prep.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, "redo-prep.jsonl"));
 		session = new AgentSession({
@@ -1432,7 +1432,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-marker-recover.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, "marker-recover.jsonl"));
 		session = new AgentSession({
@@ -1523,7 +1523,7 @@ describe("AgentSession user undo/redo", () => {
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth-root-prep.db"));
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		sessionManager = SessionManager.create(tempDir, tempDir);
 		await sessionManager.setSessionFile(path.join(tempDir, "root-prep.jsonl"));
 		session = new AgentSession({
@@ -1621,14 +1621,20 @@ describe("AgentSession user undo/redo", () => {
 		// be requeued so the next prompt re-delivers it.
 		const unmounted = makeTools([notice({ added: ["demo"], removed: [] })], []);
 		unmounted.reconcileAnnouncedMounts();
-		const unmountNotice = unmounted.takePendingXdevMountNotice(true);
+		const unmountNotice = unmounted.takePendingXdevMountNotice({
+			baseCatalogDelivered: true,
+			expectedContentKey: unmounted.peekPendingXdevMountNotice({ baseCatalogDelivered: true })!.contentKey,
+		});
 		expect(unmountNotice?.details?.removed).toContain("demo");
 
 		// Rolled-back mount: the surviving transcript never learned about demo,
 		// but the device is live — the mount must be requeued.
 		const mounted = makeTools([], ["demo"]);
 		mounted.reconcileAnnouncedMounts();
-		const mountNotice = mounted.takePendingXdevMountNotice(true);
+		const mountNotice = mounted.takePendingXdevMountNotice({
+			baseCatalogDelivered: true,
+			expectedContentKey: mounted.peekPendingXdevMountNotice({ baseCatalogDelivered: true })!.contentKey,
+		});
 		expect(mountNotice?.details?.added).toContain("demo");
 
 		// Same outcome when the transcript's last word was a removal notice:
@@ -1637,13 +1643,22 @@ describe("AgentSession user undo/redo", () => {
 		// as a delivered unmount.
 		const remounted = makeTools([notice({ added: [], removed: ["demo"] })], ["demo"]);
 		remounted.reconcileAnnouncedMounts();
-		const remountNotice = remounted.takePendingXdevMountNotice(true);
+		const remountNotice = remounted.takePendingXdevMountNotice({
+			baseCatalogDelivered: true,
+			expectedContentKey: remounted.peekPendingXdevMountNotice({ baseCatalogDelivered: true })!.contentKey,
+		});
 		expect(remountNotice?.details?.added).toContain("demo");
 
 		// Consistent state: transcript matches live mounts — nothing requeued.
 		const consistent = makeTools([notice({ added: ["demo"], removed: [] })], ["demo"]);
 		consistent.reconcileAnnouncedMounts();
-		expect(consistent.takePendingXdevMountNotice(true)).toBeUndefined();
+		const consistentPeek = consistent.peekPendingXdevMountNotice({ baseCatalogDelivered: true });
+		expect(
+			consistent.takePendingXdevMountNotice({
+				baseCatalogDelivered: true,
+				expectedContentKey: consistentPeek?.contentKey ?? "",
+			}),
+		).toBeUndefined();
 		// Redo after undo: the undo requeued a mount for demo (the rewound
 		// transcript lost the notice), then redo restored the notice — the
 		// queued addition is now satisfied by the restored transcript and must
@@ -1660,7 +1675,10 @@ describe("AgentSession user undo/redo", () => {
 		// removal notice must be delivered.
 		liveMounts.delete("demo");
 		redoCase.reconcileAnnouncedMounts();
-		const removalNotice = redoCase.takePendingXdevMountNotice(true);
+		const removalNotice = redoCase.takePendingXdevMountNotice({
+			baseCatalogDelivered: true,
+			expectedContentKey: redoCase.peekPendingXdevMountNotice({ baseCatalogDelivered: true })!.contentKey,
+		});
 		expect(removalNotice?.details?.removed).toContain("demo");
 	});
 

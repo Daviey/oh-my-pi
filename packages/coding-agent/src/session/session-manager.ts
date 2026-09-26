@@ -2609,7 +2609,7 @@ export class SessionManager {
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const sourceSize =
 			loadedSession?.sourceSize !== undefined
-				? loadedSession.sourceSize
+				? (loadedSession.sourceSize ?? null)
 				: this.#storage.existsSync(resolvedSessionFile)
 					? this.#storage.statSync(resolvedSessionFile).size
 					: null;
@@ -2746,7 +2746,7 @@ export class SessionManager {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
 			this.#resetToNewSession(options?.newSession, resolvedSessionFile);
-			this.#expectedDiskSize = sourceSize;
+			this.#expectedDiskSize = sourceSize ?? null;
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
@@ -2783,7 +2783,7 @@ export class SessionManager {
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
-		this.#expectedDiskSize = sourceSize;
+		this.#expectedDiskSize = sourceSize ?? null;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;

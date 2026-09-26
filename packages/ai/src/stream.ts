@@ -945,18 +945,15 @@ function streamCopilotAuto(
 			if (!rawApiKey) throw new AIError.MissingApiKeyError(model.provider);
 			const accessToken = parseGitHubCopilotApiKey(rawApiKey).accessToken ?? rawApiKey;
 			const baseUrl = model.baseUrl ?? "https://api.githubcopilot.com";
-			const fetchImpl = options?.fetch ?? (globalThis.fetch as FetchImpl);
+			const fetchImpl = (options?.fetch ?? globalThis.fetch) as typeof fetch;
 			const session = await ensureCopilotAutoSession(accessToken, baseUrl, fetchImpl);
 			if (!session) {
 				throw new ProviderHttpError(
 					"Copilot auto-selection session unavailable (is the Copilot token valid?)",
 					503,
-					model.provider,
 				);
 			}
-			const prompt = lastUserPrompt(
-				context.messages as ReadonlyArray<{ role?: string; content?: unknown }>,
-			);
+			const prompt = lastUserPrompt(context.messages as ReadonlyArray<{ role?: string; content?: unknown }>);
 			const intent = await classifyCopilotIntent(accessToken, session, prompt, baseUrl, fetchImpl);
 			const chosenModel = intent?.chosenModel ?? session.selectedModel;
 			// Swap in the concrete pool model, inheriting its endpoint family.
@@ -978,7 +975,7 @@ function streamCopilotAuto(
 			}
 			if (!outer.done) outer.end(await inner.result());
 		} catch (error) {
-if (!outer.done) outer.fail(error as Error);
+			if (!outer.done) outer.fail(error as Error);
 		}
 	})();
 	return outer;

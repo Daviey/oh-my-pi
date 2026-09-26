@@ -18,10 +18,8 @@ export interface FileLockOptions {
 	signal?: AbortSignal;
 }
 
-/** An exclusive OS-backed lease. Releasing an already released handle is safe. */
-export interface FileLockHandle {
-	release(): void;
-}
+/** Named handle type for the OS-backed lock (stable API surface for callers). */
+export type FileLockHandle = NativeFileLock;
 
 const DEFAULT_OPTIONS = {
 	retries: 50,
@@ -55,7 +53,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 
 function acquireLockSync(filePath: string, options: FileLockOptions = {}): NativeFileLock {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const lockPath = getLockPath(filePath);
+	const lockPath = lockPathFor(filePath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
 		opts.signal?.throwIfAborted();
@@ -67,8 +65,6 @@ function acquireLockSync(filePath: string, options: FileLockOptions = {}): Nativ
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
 }
 
-/** Named handle type for the OS-backed lock (stable API surface for callers). */
-export type FileLockHandle = NativeFileLock;
 /**
  * Synchronous non-blocking claim on the same lock {@link withFileLock} uses.
  * Sync call sites (session writer open, synchronous rewrites) pair this with

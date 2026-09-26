@@ -385,9 +385,7 @@ describe("AgentSession shake", () => {
 			expect(result.mode).toBe("images");
 			expect(result.imagesDropped).toBe(1);
 			const branch = sessionManager.getBranch();
-			const userMsgs = branch.filter(
-				e => e.type === "message" && (e.message as { role?: string }).role === "user",
-			);
+			const userMsgs = branch.filter(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const contents = userMsgs.map(
 				e => (e as { message: { content: Array<{ type: string; text?: string }> } }).message.content,
 			);

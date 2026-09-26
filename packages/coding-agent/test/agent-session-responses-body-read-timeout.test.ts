@@ -596,7 +596,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 				rewriteStarted.resolve();
 				await releaseRewrite.promise;
 			}
-			await originalRewrite();
+			return (await originalRewrite()) ?? true;
 		});
 		try {
 			const firstPrompt = harness.session.prompt("continue");

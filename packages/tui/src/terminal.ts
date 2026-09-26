@@ -328,9 +328,9 @@ function ttyInputQueueRead(handler: (data: string) => void): number {
 	if (ttyDirectRead === undefined) {
 		try {
 			const libc = dlopen(process.platform === "darwin" ? "libSystem.dylib" : "libc.so.6", {
-				read: { args: [FFIType.i32, FFIType.ptr, FFIType.usize], returns: FFIType.isize },
+				read: { args: [FFIType.i32, FFIType.ptr, (FFIType as any).usize], returns: (FFIType as any).isize },
 			});
-			ttyDirectRead = libc.symbols.read as FdRead;
+			ttyDirectRead = libc.symbols.read as unknown as FdRead;
 		} catch {
 			ttyDirectRead = null;
 		}
