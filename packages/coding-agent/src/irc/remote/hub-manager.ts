@@ -59,6 +59,26 @@ export function configureHub(options: { enabled: boolean; socketPath: string }):
 }
 
 /**
+ * Eager-connect retry state: a session that loses the startup race (spawn
+ * deadline hit while another process's broker is still binding) must not
+ * stay off the bus forever. Bounded backoff; success resets the ladder.
+ */
+const RETRY_DELAYS_MS = [1_000, 5_000, 30_000];
+let retryAttempt = 0;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleHubRetry(): void {
+	if (!enabled || current || starting) return;
+	if (retryAttempt >= RETRY_DELAYS_MS.length) return; // give up; lazy ops still work
+	const delay = RETRY_DELAYS_MS[retryAttempt++];
+	retryTimer = setTimeout(() => {
+		retryTimer = undefined;
+		void ensureHubClient();
+	}, delay);
+	retryTimer.unref?.();
+}
+
+/**
  * Connect (and register this process under the main agent id) when armed.
  * Resolves null when disabled or unreachable within the client timeout.
  */
@@ -66,6 +86,7 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 	if (!enabled) return null;
 	if (current) return current;
 	if (!starting) {
+		// See RETRY_DELAYS_MS below: failures back off, successes reset.
 		starting = HubClient.connect({
 			socketPath,
 			identity: {
@@ -76,15 +97,23 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 			},
 		})
 			.then(async client => {
+				if (client) {
+					retryAttempt = 0;
+					const { IrcBus } = await import("../bus");
+					IrcBus.global().attachHubClient(client);
+					// Broker died (idle-exit/crash): drop the cached client and
+					// schedule a reconnect — a session must not silently fall
+					// off the bus after one disconnect.
+					client.onClose(() => {
+						if (current === client) current = null;
+						scheduleHubRetry();
+					});
+				} else {
+					// Startup-race loser (spawn deadline hit): retry on backoff
+					// instead of staying unsubscribed until a manual hub op.
+					scheduleHubRetry();
+				}
 				current = client;
-				if (!client) return null;
-				const { IrcBus } = await import("../bus");
-				IrcBus.global().attachHubClient(client);
-				// Broker died (idle-exit/crash): drop the cached client so the
-				// next hub op (or session wake) reconnects and re-spawns.
-				client.onClose(() => {
-					if (current === client) current = null;
-				});
 				return client;
 			})
 			.catch(() => null)
