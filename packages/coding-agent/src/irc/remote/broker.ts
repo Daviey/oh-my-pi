@@ -148,7 +148,11 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 	// Keyed by project + agentId: agent ids are only unique within a process
 	// (every process's main agent is the same constant), so bare keys would let
 	// two projects' "main" evict each other from the roster.
-	const rosterByAgent = new Map<string, { entry: HubRosterEntry; conn: ClientConn }>();
+	// Per-key SET of registrations: same-key peers coexist (every process's
+	// main agent is the same constant, so two sessions in one project share
+	// (project, MAIN_AGENT_ID) — replace semantics would evict the first on
+	// the second hello and make it permanently invisible via self-exclusion).
+	const rosterByAgent = new Map<string, Set<{ entry: HubRosterEntry; conn: ClientConn }>>();
 
 	function rosterKey(project: string, agentId: string): string {
 		return `${project}\u0000${agentId}`;
@@ -178,17 +182,22 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 
 	function rosterSnapshot(exclude?: ClientConn): HubRosterEntry[] {
 		const out: HubRosterEntry[] = [];
-		for (const record of rosterByAgent.values()) {
-			if (record.conn === exclude) continue;
-			out.push(record.entry);
+		for (const records of rosterByAgent.values()) {
+			for (const record of records) {
+				if (record.conn === exclude) continue;
+				out.push(record.entry);
+			}
 		}
 		return out;
 	}
 
 	function dropConnection(conn: ClientConn): void {
 		if (!connections.delete(conn)) return;
-		for (const [agentId, record] of rosterByAgent) {
-			if (record.conn === conn) rosterByAgent.delete(agentId);
+		for (const [key, records] of rosterByAgent) {
+			for (const record of records) {
+				if (record.conn === conn) records.delete(record);
+			}
+			if (records.size === 0) rosterByAgent.delete(key);
 		}
 		if (connections.size === 0) armIdleTimer();
 	}
@@ -211,7 +220,17 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						...(entry.sessionFile ? { sessionFile: String(entry.sessionFile) } : {}),
 					};
 					conn.agents.add(normalized.agentId);
-					rosterByAgent.set(rosterKey(normalized.project, normalized.agentId), { entry: normalized, conn });
+					const key = rosterKey(normalized.project, normalized.agentId);
+					let records = rosterByAgent.get(key);
+					if (!records) {
+						records = new Set();
+						rosterByAgent.set(key, records);
+					}
+					// Re-hello from the same conn updates its entry in place.
+					for (const existing of records) {
+						if (existing.conn === conn) records.delete(existing);
+					}
+					records.add({ entry: normalized, conn });
 				}
 				send(conn, { type: "welcome", self: frame.agents[0]?.agentId ?? "", roster: rosterSnapshot(conn) });
 				break;
@@ -219,10 +238,11 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 			case "status": {
 				// Match on the connection's own registration: the status frame
 				// carries a bare agentId, which is unique only within the sender.
-				for (const [key, record] of rosterByAgent) {
-					if (record.conn === conn && record.entry.agentId === frame.agentId) {
-						record.entry.status = frame.status === "idle" ? "idle" : "running";
-						void key;
+				for (const records of rosterByAgent.values()) {
+					for (const record of records) {
+						if (record.conn === conn && record.entry.agentId === frame.agentId) {
+							record.entry.status = frame.status === "idle" ? "idle" : "running";
+						}
 					}
 				}
 				break;
@@ -239,35 +259,39 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 					// client resolves that before publishing, so an unqualified
 					// target here matches any single registration of the id only
 					// when it is unambiguous across the roster.
-					const candidates = [...rosterByAgent.values()].filter(
-						candidate => candidate.entry.agentId === target.agentId,
-					);
-					const record =
+					// Flatten to per-registration records; same-key peers coexist.
+					const candidates: { entry: HubRosterEntry; conn: ClientConn }[] = [];
+					for (const records of rosterByAgent.values()) {
+						for (const record of records) {
+							if (record.entry.agentId === target.agentId) candidates.push(record);
+						}
+					}
+					const matches =
 						target.project !== undefined
-							? candidates.find(candidate => candidate.entry.project === target.project)
-							: candidates.length === 1
-								? candidates[0]
-								: undefined;
-					if (record === undefined || record.conn === conn) {
+							? candidates.filter(candidate => candidate.entry.project === target.project)
+							: candidates;
+					// Fan out to every same-key registration (each is a distinct
+					// process); ok if at least one delivery succeeded.
+					const deliverable = matches.filter(candidate => candidate.conn !== conn);
+					if (deliverable.length === 0) {
 						results.push({
 							to: target.agentId,
 							ok: false,
-							// Known id but wrong namespace → project-mismatch; the
-							// roster proves the peer exists, just not here.
-							error: candidates.length > 0 ? "project-mismatch" : "unknown-agent",
+							error: matches.length > 0 ? "project-mismatch" : "unknown-agent",
 						});
 						continue;
 					}
-					try {
-						send(record.conn, { type: "deliver", msg: frame.msg });
-						results.push({ to: target.agentId, ok: true });
-					} catch (error) {
-						results.push({
-							to: target.agentId,
-							ok: false,
-							error: error instanceof Error ? error.message : String(error),
-						});
+					let anyOk = false;
+					let lastError: string | undefined;
+					for (const record of deliverable) {
+						try {
+							send(record.conn, { type: "deliver", msg: frame.msg });
+							anyOk = true;
+						} catch (error) {
+							lastError = error instanceof Error ? error.message : String(error);
+						}
 					}
+					results.push({ to: target.agentId, ok: anyOk, ...(anyOk ? {} : { error: lastError }) });
 				}
 				send(conn, { type: "publishAck", id: frame.msg?.id ?? "", results });
 				break;

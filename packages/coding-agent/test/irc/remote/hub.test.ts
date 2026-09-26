@@ -189,6 +189,38 @@ describe("hub broker protocol", () => {
 		expect(mode).toBe(0o600);
 	}, 10_000);
 
+	it("two clients, SAME project + same agentId, both visible to each other (MAIN_AGENT_ID collision)", async () => {
+		const socketPath = makeBrokerPath();
+		const listening = Promise.withResolvers<void>();
+		void startHubBroker({ socketPath, idleGraceMs: 60_000, onListening: listening.resolve });
+		await listening.promise;
+		// Both register the same (project, agentId) — exactly what two live
+		// sessions do (every process's main agent is MAIN_AGENT_ID).
+		const a = new RawPeer(socketPath);
+		await a.connect();
+		a.write({ type: "hello", agents: [identity("main", "proj-x")] });
+		expect((await a.next()).type).toBe("welcome");
+		const b = new RawPeer(socketPath);
+		await b.connect();
+		b.write({ type: "hello", agents: [identity("main", "proj-x")] });
+		const bWelcome = await b.next();
+		expect(bWelcome.type).toBe("welcome");
+		// B's welcome roster must include A (collision must not evict A).
+		const roster = (bWelcome as { roster?: { agentId: string }[] }).roster ?? [];
+		expect(roster.some(e => e.agentId === "main")).toBe(true);
+		// And A's roster query sees B too.
+		a.write({ type: "roster" });
+		const aRoster = await a.next();
+		const aList = (aRoster as { roster?: { agentId: string }[] }).roster ?? [];
+		expect(aList.some(e => e.agentId === "main")).toBe(true);
+		// Publish from B fans out to A (deliver frame arrives).
+		b.write({ type: "publish", msg: { id: "m1", from: "main", to: "main", body: "hi", ts: Date.now() }, targets: [{ agentId: "main", project: "proj-x" }] });
+		const delivered = await a.next();
+		expect(delivered.type).toBe("deliver");
+		a.end();
+		b.end();
+	}, 10_000);
+
 	it("second broker against a live one exits instead of hanging (probeLive connect resolves)", async () => {
 		const socketPath = makeBrokerPath();
 		const listening = Promise.withResolvers<void>();
