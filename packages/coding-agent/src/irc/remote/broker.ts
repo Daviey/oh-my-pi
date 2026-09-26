@@ -168,7 +168,11 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
+		const pathListening = Promise.withResolvers<void>();
+		pathServer.once("listening", pathListening.resolve);
+		pathServer.once("error", pathListening.reject);
 		pathServer.listen(socketPath);
+		await pathListening.promise;
 	} finally {
 		process.umask(previousUmask);
 	}
@@ -198,7 +202,8 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 		idleTimer = setTimeout(() => {
 			logger.debug("hub broker: idle grace elapsed; exiting", { socketPath });
 			for (const conn of connections) conn.socket.destroy();
-			server.close(() => {
+			server.close();
+			pathServer?.close(() => {
 				try {
 					fs.unlinkSync(socketPath);
 				} catch {
@@ -382,6 +387,9 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 	if (pathServer) pathServer.on("connection", onConnection);
 	server.on("error", error => {
 		logger.debug("hub broker: server error", { socketPath, error: String(error) });
+	});
+	pathServer?.on("error", error => {
+		logger.debug("hub broker: path server error", { socketPath, error: String(error) });
 	});
 
 	armIdleTimer();

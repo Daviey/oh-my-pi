@@ -1,3 +1,4 @@
+import { appendFileSync, readFileSync } from "node:fs";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -30,9 +31,47 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
+	/** Delivered IRC msg ids (persisted across resumes in a sidecar file):
+	 *  a republish of the same id (sender retry, resume replay) must not
+	 *  inject twice into the transcript. */
+	#seenIds: Set<string> | undefined;
+	#seenIdsLoaded = false;
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+	}
+
+	/** Sidecar path next to the session journal: `<session>.irc-seen`. */
+	#seenIdsPath(): string {
+		return `${this.#host.sessionManager.getSessionFile()}.irc-seen`;
+	}
+
+	/** Lazily load the persisted seen-id set (bounded to the last 4096 ids). */
+	#loadSeenIds(): Set<string> {
+		if (this.#seenIdsLoaded) return this.#seenIds ?? new Set();
+		this.#seenIdsLoaded = true;
+		this.#seenIds = new Set();
+		try {
+			const raw = readFileSync(this.#seenIdsPath(), "utf8");
+			for (const id of raw.split("\n").slice(-4096)) {
+				if (id) this.#seenIds.add(id);
+			}
+		} catch {
+			// First delivery in this session's life: empty set is correct.
+		}
+		return this.#seenIds;
+	}
+
+	#recordSeenId(id: string): void {
+		const seen = this.#loadSeenIds();
+		seen.add(id);
+		try {
+			// Append-only journal line; loader caps the set at 4096.
+			appendFileSync(this.#seenIdsPath(), `${id}\n`, { flag: "a" });
+		} catch {
+			// Persistence failure must not block delivery; in-memory set still
+			// dedupes within this process lifetime.
+		}
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -174,6 +213,11 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		// Idempotency: a republished msg.id (sender retry, resume replay) is
+		// dropped — exactly-once inject per id, persisted across resumes.
+		const seen = this.#loadSeenIds();
+		if (seen.has(msg.id)) return "injected";
+		this.#recordSeenId(msg.id);
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		// An idle subagent runs a monitored wake turn whose output is relayed
