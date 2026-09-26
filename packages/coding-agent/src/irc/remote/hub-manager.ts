@@ -46,12 +46,13 @@ export interface HubRosterRow {
 }
 
 /**
- * Arm the hub for this process. First write wins: subagent sessions construct
- * with their own Settings, and a later construction must never silently flip
- * the process-global hub config mid-run.
+ * Arm the hub for this process. Disabled→enabled transitions are allowed
+ * (session construction order is not guaranteed main-first, so an early
+ * disabled write must not permanently lock the hub off); enabled→disabled
+ * is refused — a later session can never silently tear the hub down mid-run.
  */
 export function configureHub(options: { enabled: boolean; socketPath: string }): void {
-	if (armed) return;
+	if (armed && (enabled || !options.enabled)) return;
 	armed = true;
 	enabled = options.enabled;
 	socketPath = resolveHubSocketPath(options.socketPath, getAgentDir());
