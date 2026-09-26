@@ -252,14 +252,15 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				break;
 			}
 			case "publish": {
-				const results: { to: string; ok: boolean; error?: string }[] = [];
+				// Frame-level aggregation: identical target rows (per-roster-row
+				// expansion when several sessions share (project, agentId)) must
+				// deliver ONE frame per peer connection, not one per target row.
+				// Collect deliveries across all targets first, send once per conn,
+				// then report per-target success from the shared outcome.
+				const deliverConns = new Set<ClientConn>();
+				const targetMatches: { agentId: string; conns: Set<ClientConn>; matched: number }[] = [];
 				for (const target of frame.targets) {
 					if (typeof target?.agentId !== "string" || !target.agentId) continue;
-					// A target without a project means the SENDER's namespace: the
-					// client resolves that before publishing, so an unqualified
-					// target here matches any single registration of the id only
-					// when it is unambiguous across the roster.
-					// Flatten to per-registration records; same-key peers coexist.
 					const candidates: { entry: HubRosterEntry; conn: ClientConn }[] = [];
 					for (const records of rosterByAgent.values()) {
 						for (const record of records) {
@@ -270,29 +271,38 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						target.project !== undefined
 							? candidates.filter(candidate => candidate.entry.project === target.project)
 							: candidates;
-					// Fan out to every same-key registration (each is a distinct
-					// process); ok if at least one delivery succeeded.
-					const deliverable = matches.filter(candidate => candidate.conn !== conn);
-					if (deliverable.length === 0) {
-						results.push({
-							to: target.agentId,
-							ok: false,
-							error: matches.length > 0 ? "project-mismatch" : "unknown-agent",
-						});
-						continue;
-					}
-					let anyOk = false;
-					let lastError: string | undefined;
-					for (const record of deliverable) {
-						try {
-							send(record.conn, { type: "deliver", msg: frame.msg });
-							anyOk = true;
-						} catch (error) {
-							lastError = error instanceof Error ? error.message : String(error);
+					const conns = new Set<ClientConn>();
+					for (const candidate of matches) {
+						if (candidate.conn !== conn) {
+							conns.add(candidate.conn);
+							deliverConns.add(candidate.conn);
 						}
 					}
-					results.push({ to: target.agentId, ok: anyOk, ...(anyOk ? {} : { error: lastError }) });
+					targetMatches.push({ agentId: target.agentId, conns, matched: matches.length });
 				}
+				let anyOk = false;
+				let lastError: string | undefined;
+				for (const targetConn of deliverConns) {
+					try {
+						send(targetConn, { type: "deliver", msg: frame.msg });
+						anyOk = true;
+					} catch (error) {
+						lastError = error instanceof Error ? error.message : String(error);
+					}
+				}
+				const results = targetMatches.map(({ agentId, conns, matched }) => {
+					if (matched === 0) {
+						return { to: agentId, ok: false, error: "unknown-agent" as const };
+					}
+					// Roster proved the peer exists but every holder is the sender's
+						// own conn → wrong-namespace style miss, not unknown.
+					if (conns.size === 0) {
+						return { to: agentId, ok: false, error: "project-mismatch" as const };
+					}
+					return anyOk
+						? ({ to: agentId, ok: true } as const)
+						: ({ to: agentId, ok: false, error: lastError } as const);
+				});
 				send(conn, { type: "publishAck", id: frame.msg?.id ?? "", results });
 				break;
 			}

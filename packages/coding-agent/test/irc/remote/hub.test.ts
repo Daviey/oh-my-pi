@@ -221,6 +221,40 @@ describe("hub broker protocol", () => {
 		b.end();
 	}, 10_000);
 
+	it("duplicate targets for the same peer deliver once per connection (no dup frames)", async () => {
+		const socketPath = makeBrokerPath();
+		const listening = Promise.withResolvers<void>();
+		void startHubBroker({ socketPath, idleGraceMs: 60_000, onListening: listening.resolve });
+		await listening.promise;
+		const a = new RawPeer(socketPath);
+		await a.connect();
+		a.write({ type: "hello", agents: [identity("main", "p")] });
+		await a.next(); // welcome
+		const b = new RawPeer(socketPath);
+		await b.connect();
+		b.write({ type: "hello", agents: [identity("other", "p")] });
+		await b.next();
+		// B publishes TWO identical target rows for "main" (what per-roster-row
+		// expansion produces when several sessions share the id).
+		b.write({
+			type: "publish",
+			msg: { id: "d1", from: "other", to: "main", body: "once", ts: Date.now() },
+			targets: [
+				{ agentId: "main", project: "p" },
+				{ agentId: "main", project: "p" },
+			],
+		});
+		const ack = await b.next();
+		expect((ack as { results?: { ok: boolean }[] }).results?.every(r => r.ok)).toBe(true);
+		// A must receive exactly ONE deliver frame, not two.
+		const first = await a.next();
+		expect(first.type).toBe("deliver");
+		const second = await a.next(500);
+		expect((second as { type: string; message?: string }).message).toBe("timeout"); // no dup frame
+		a.end();
+		b.end();
+	}, 10_000);
+
 	it("second broker against a live one exits instead of hanging (probeLive connect resolves)", async () => {
 		const socketPath = makeBrokerPath();
 		const listening = Promise.withResolvers<void>();
