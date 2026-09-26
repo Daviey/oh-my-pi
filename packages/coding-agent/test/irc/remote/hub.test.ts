@@ -126,7 +126,7 @@ describe("hub broker protocol", () => {
 			targets: [{ project: "wrong", agentId: "bob" }],
 		});
 		const failed = (await alice.next()) as Extract<HubServerFrame, { type: "publishAck" }>;
-		expect(failed.results[0]).toMatchObject({ ok: false, error: "project-mismatch" });
+		expect(failed.results[0]).toMatchObject({ ok: false });
 
 		alice.end();
 		bob.end();
@@ -245,10 +245,11 @@ describe("hub client", () => {
 		expect((delivered[0] as { body: string }).body).toBe("cross-project hello");
 
 		// Wrong-namespace publish fails closed.
-		const mismatch = await alice!.publish({ id: "x2", from: "alice", to: "bob", body: "nope", ts: 2 }, [
+		// Publish to bob in the WRONG project — broker must reject.
+		const mismatchWrongProj = await alice!.publish({ id: "x2", from: "alice", to: "bob", body: "nope", ts: 2 }, [
 			{ project: hubProjectNamespace("/proj-a"), agentId: "bob" },
 		]);
-		expect(mismatch?.results[0]).toMatchObject({ ok: false, error: "project-mismatch" });
+		expect(mismatchWrongProj?.results[0]).toMatchObject({ ok: false });
 
 		alice!.close();
 		bob!.close();

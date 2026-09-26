@@ -15,6 +15,7 @@ let current: HubClient | null = null;
 let starting: Promise<HubClient | null> | null = null;
 let enabled = false;
 let socketPath = "";
+let armed = false;
 
 /** Whether system-scope hub support is armed for this process. */
 export function isHubEnabled(): boolean {
@@ -44,8 +45,14 @@ export interface HubRosterRow {
 	remote: true;
 }
 
-/** Arm the hub for this process; safe to call repeatedly with the same config. */
+/**
+ * Arm the hub for this process. First write wins: subagent sessions construct
+ * with their own Settings, and a later construction must never silently flip
+ * the process-global hub config mid-run.
+ */
 export function configureHub(options: { enabled: boolean; socketPath: string }): void {
+	if (armed) return;
+	armed = true;
 	enabled = options.enabled;
 	socketPath = resolveHubSocketPath(options.socketPath, getAgentDir());
 }
@@ -97,4 +104,11 @@ export async function ensureHubSocketParent(): Promise<void> {
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
+}
+
+/** Test-only: reset the armed process-global hub config. */
+export function resetHubForTests(): void {
+	armed = false;
+	enabled = false;
+	socketPath = "";
 }

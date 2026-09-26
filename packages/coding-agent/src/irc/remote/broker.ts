@@ -141,7 +141,14 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 	logger.debug("hub broker: listening", { socketPath });
 
 	const connections = new Set<ClientConn>();
+	// Keyed by project + agentId: agent ids are only unique within a process
+	// (every process's main agent is the same constant), so bare keys would let
+	// two projects' "main" evict each other from the roster.
 	const rosterByAgent = new Map<string, { entry: HubRosterEntry; conn: ClientConn }>();
+
+	function rosterKey(project: string, agentId: string): string {
+		return `${project}\u0000${agentId}`;
+	}
 	let idleTimer: NodeJS.Timeout | undefined;
 
 	function armIdleTimer(): void {
@@ -200,15 +207,19 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						...(entry.sessionFile ? { sessionFile: String(entry.sessionFile) } : {}),
 					};
 					conn.agents.add(normalized.agentId);
-					rosterByAgent.set(normalized.agentId, { entry: normalized, conn });
+					rosterByAgent.set(rosterKey(normalized.project, normalized.agentId), { entry: normalized, conn });
 				}
 				send(conn, { type: "welcome", self: frame.agents[0]?.agentId ?? "", roster: rosterSnapshot(conn) });
 				break;
 			}
 			case "status": {
-				const record = rosterByAgent.get(frame.agentId);
-				if (record?.conn === conn) {
-					record.entry.status = frame.status === "idle" ? "idle" : "running";
+				// Match on the connection's own registration: the status frame
+				// carries a bare agentId, which is unique only within the sender.
+				for (const [key, record] of rosterByAgent) {
+					if (record.conn === conn && record.entry.agentId === frame.agentId) {
+						record.entry.status = frame.status === "idle" ? "idle" : "running";
+						void key;
+					}
 				}
 				break;
 			}
@@ -220,9 +231,20 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				const results: { to: string; ok: boolean; error?: string }[] = [];
 				for (const target of frame.targets) {
 					if (typeof target?.agentId !== "string" || !target.agentId) continue;
-					const record = rosterByAgent.get(target.agentId);
-					const matches =
-						record !== undefined && (target.project === undefined || record.entry.project === target.project);
+					// A target without a project means the SENDER's namespace: the
+					// client resolves that before publishing, so an unqualified
+					// target here matches any single registration of the id only
+					// when it is unambiguous across the roster.
+					const candidates = [...rosterByAgent.values()].filter(
+						candidate => candidate.entry.agentId === target.agentId,
+					);
+					const record =
+						target.project !== undefined
+							? candidates.find(candidate => candidate.entry.project === target.project)
+							: candidates.length === 1
+								? candidates[0]
+								: undefined;
+					const matches = record !== undefined;
 					if (!matches || record.conn === conn) {
 						results.push({
 							to: target.agentId,

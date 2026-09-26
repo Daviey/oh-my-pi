@@ -75,7 +75,10 @@ export class HubClient {
 		const connected = await client.#connectWithSpawn();
 		if (!connected) return null;
 		const welcome = await client.#request({ type: "hello", agents: [options.identity] });
-		if (welcome?.type !== "welcome") return null;
+		if (welcome?.type !== "welcome") {
+			client.close();
+			return null;
+		}
 		client.#identity = options.identity;
 		return client;
 	}
