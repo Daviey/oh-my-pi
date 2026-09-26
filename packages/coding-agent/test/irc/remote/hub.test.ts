@@ -189,6 +189,20 @@ describe("hub broker protocol", () => {
 		expect(mode).toBe(0o600);
 	}, 10_000);
 
+	it("second broker against a live one exits instead of hanging (probeLive connect resolves)", async () => {
+		const socketPath = makeBrokerPath();
+		const listening = Promise.withResolvers<void>();
+		void startHubBroker({ socketPath, idleGraceMs: 60_000, onListening: listening.resolve });
+		await listening.promise;
+		// The loser must resolve startHubBroker quickly (quiet exit), not hang
+		// on an unresolved probeLive promise. Race: probe→winner alive→return.
+		const loserStart = Date.now();
+		await startHubBroker({ socketPath, idleGraceMs: 60_000 });
+		expect(Date.now() - loserStart).toBeLessThan(3_000);
+		// Winner still serves.
+		expect(fs.existsSync(socketPath)).toBe(true);
+	}, 10_000);
+
 	it("exits after the idle grace with no peers", async () => {
 		const socketPath = makeBrokerPath();
 		// Real-timer test: exercises the broker's own idle-grace timer against

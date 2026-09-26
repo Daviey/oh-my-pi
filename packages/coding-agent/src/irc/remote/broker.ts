@@ -96,6 +96,10 @@ function probeLive(socketPath: string): Promise<boolean> {
 		socket.destroy();
 		resolve(result);
 	};
+	// Successful connect resolves true — without this a losing broker probing
+	// a live winner hangs forever on this promise (zombie process per
+	// cold-start storm; eager-subscribe spawns make that N-1 per host boot).
+	socket.on("connect", () => done(true));
 	socket.on("error", () => done(false));
 	return promise;
 }
