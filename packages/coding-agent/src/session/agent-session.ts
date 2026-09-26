@@ -125,7 +125,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { cfgHubSystemScopeEnabled, cfgHubSystemScopeSocketPath } from "../hub/settings";
-import { configureHub } from "../irc/remote/hub-manager";
+import { configureHub, ensureHubClient } from "../irc/remote/hub-manager";
 import type { Settings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
@@ -1422,6 +1422,12 @@ export class AgentSession implements SettingsScope {
 			enabled: cfgHubSystemScopeEnabled.get(this.settings),
 			socketPath: cfgHubSystemScopeSocketPath.get(this.settings),
 		});
+		// Eager subscribe: opt-in sessions join the broker at startup so they
+		// are on the roster (and hear deliveries) before their first hub op.
+		// Fire-and-forget — never block session construction.
+		if (cfgHubSystemScopeEnabled.get(this.settings)) {
+			void ensureHubClient().catch(() => {});
+		}
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;

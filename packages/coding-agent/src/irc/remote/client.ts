@@ -59,6 +59,7 @@ export class HubClient {
 	#deliveries: ((msg: IrcMessage) => void) | undefined;
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
+	#onClose: (() => void) | undefined;
 
 	private constructor(
 		readonly socketPath: string,
@@ -108,6 +109,11 @@ export class HubClient {
 	/** Register the local sink for broker-relayed deliveries. */
 	onDelivery(sink: (msg: IrcMessage) => void): void {
 		this.#deliveries = sink;
+	}
+
+	/** Invoked when the socket closes (broker death); hub-manager clears its cached client. */
+	onClose(handler: () => void): void {
+		this.#onClose = handler;
 	}
 
 	/** Send bye and detach; safe to call repeatedly. */
@@ -167,6 +173,7 @@ export class HubClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("hub broker connection closed"));
+			this.#onClose?.();
 		});
 		socket.on("error", () => socket.destroy());
 		return true;

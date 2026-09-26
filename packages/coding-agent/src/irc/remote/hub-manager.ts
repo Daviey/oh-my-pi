@@ -80,6 +80,11 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 				if (!client) return null;
 				const { IrcBus } = await import("../bus");
 				IrcBus.global().attachHubClient(client);
+				// Broker died (idle-exit/crash): drop the cached client so the
+				// next hub op (or session wake) reconnects and re-spawns.
+				client.onClose(() => {
+					if (current === client) current = null;
+				});
 				return client;
 			})
 			.catch(() => null)
