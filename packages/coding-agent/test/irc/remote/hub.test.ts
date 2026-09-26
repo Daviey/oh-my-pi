@@ -284,3 +284,14 @@ afterAll(() => {
 		} catch {}
 	}
 });
+
+describe("hub default-off", () => {
+	it("disabled hub yields no client and creates no socket", async () => {
+		const { configureHub, ensureHubClient } = await import("@oh-my-pi/pi-coding-agent/irc/remote/hub-manager");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hub-off-"));
+		configureHub({ enabled: false, socketPath: path.join(dir, "hub.sock") });
+		const client = await ensureHubClient();
+		expect(client).toBeNull();
+		expect(fs.existsSync(path.join(dir, "hub.sock"))).toBe(false);
+	});
+});

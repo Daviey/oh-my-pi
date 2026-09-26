@@ -7,6 +7,7 @@ import { currentHubClient, hubRoster, ensureHubClient, isHubEnabled } from "./re
 import { hubProjectNamespace } from "./remote/broker";
 import type { HubTarget } from "./remote/protocol";
 import type { AgentRef } from "../registry/agent-registry";
+import type { HubRosterRow } from "./remote/hub-manager";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
@@ -129,7 +130,7 @@ function parseProjectScope(to: string): { project: string; agentId: string } | n
 }
 
 /** Broker roster rows merged into the registry's remote peer overlay. */
-function hubRowsToRefs(rows: Awaited<ReturnType<typeof hubRoster>>): AgentRef[] {
+function hubRowsToRefs(rows: HubRosterRow[]): AgentRef[] {
 	return rows.map(row => ({
 		id: row.agentId,
 		displayName: row.agentId,
@@ -151,7 +152,7 @@ async function sendProjectScoped(deps: {
 	senderId: string;
 	message: string;
 	scope: { project: string; agentId: string };
-	remotePeers: Awaited<ReturnType<typeof hubRoster>>;
+	remotePeers: HubRosterRow[];
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, scope, remotePeers } = deps;
 	const client = currentHubClient();
