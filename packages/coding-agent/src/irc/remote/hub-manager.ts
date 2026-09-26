@@ -126,6 +126,10 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 
 /** Detach from the broker (test seam and shutdown). */
 export async function shutdownHubClient(): Promise<void> {
+	if (retryTimer) {
+		clearTimeout(retryTimer);
+		retryTimer = undefined;
+	}
 	const client = current;
 	current = null;
 	enabled = false;
@@ -143,6 +147,11 @@ export async function ensureHubSocketParent(): Promise<void> {
 
 /** Test-only: reset the armed process-global hub config. */
 export function resetHubForTests(): void {
+	if (retryTimer) {
+		clearTimeout(retryTimer);
+		retryTimer = undefined;
+	}
+	retryAttempt = 0;
 	armed = false;
 	enabled = false;
 	socketPath = "";
