@@ -244,12 +244,13 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 							: candidates.length === 1
 								? candidates[0]
 								: undefined;
-					const matches = record !== undefined;
-					if (!matches || record.conn === conn) {
+					if (record === undefined || record.conn === conn) {
 						results.push({
 							to: target.agentId,
 							ok: false,
-							error: record ? "project-mismatch" : "unknown-agent",
+							// Known id but wrong namespace → project-mismatch; the
+							// roster proves the peer exists, just not here.
+							error: candidates.length > 0 ? "project-mismatch" : "unknown-agent",
 						});
 						continue;
 					}
