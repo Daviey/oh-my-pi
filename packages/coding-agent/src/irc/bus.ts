@@ -11,6 +11,7 @@
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { HubClient } from "./remote/client";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
@@ -45,12 +46,29 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	/** System-scope hub client when attached; null keeps delivery strictly in-process. */
+	#hubClient: HubClient | null = null;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/**
+	 * Attach the system-scope hub client. Once attached, sends to ids absent
+	 * from the local registry are relayed through the broker (its `deliver`
+	 * frames re-enter THIS bus locally, reusing injected/woken/revived);
+	 * broadcast fan-out gains broker roster peers. Disabled/unreachable hub
+	 * never reaches this path.
+	 */
+	attachHubClient(client: HubClient): void {
+		this.#hubClient = client;
+		client.onDelivery(msg => {
+			// Relay re-enters the local machinery; never echo back over the socket.
+			void this.#deliver(msg, { suppressRelay: false });
+		});
 	}
 
 	/**
@@ -72,6 +90,13 @@ export class IrcBus {
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		// Local recipients take the in-process path synchronously — no await
+		// before #deliver, so park cancel-window timing is unchanged (the hub
+		// adds zero ticks to today's behavior). Only unknown ids consult the hub.
+		if (this.#hubClient && !this.#registry.get(message.to)) {
+			const hubReceipt = await this.#deliverViaHub(message);
+			if (hubReceipt) return hubReceipt;
+		}
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);
@@ -92,6 +117,28 @@ export class IrcBus {
 	sentSince(from: string, to: string, sinceTs: number): boolean {
 		const ts = this.#lastSent.get(from)?.get(to);
 		return ts !== undefined && ts >= sinceTs;
+	}
+
+	/**
+	 * Route a targeted send through the system-scope broker when the recipient
+	 * is not a local registry ref and the hub is attached. Returns null to
+	 * fall through to the in-process path (local recipient, hub detached, or
+	 * broker failure).
+	 */
+	async #deliverViaHub(message: IrcMessage): Promise<IrcDeliveryReceipt | null> {
+		const client = this.#hubClient;
+		if (!client) return null;
+		const result = await client.publish(message, [{ agentId: message.to }]);
+		if (!result) return null;
+		const ok = result.results.find(entry => entry.to === message.to && entry.ok);
+		if (!ok) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: result.results.find(entry => entry.to === message.to)?.error ?? "hub publish failed",
+			};
+		}
+		return { to: message.to, outcome: "injected" };
 	}
 
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {

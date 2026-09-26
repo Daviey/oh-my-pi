@@ -34,6 +34,7 @@ import {
 	BLOB_BROKER_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
 	DAEMON_BROKER_WORKER_ARG,
+	HUB_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
@@ -277,6 +278,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
 		await import("./launch/terminal-output-worker");
+		return true;
+	}
+	if (arg === HUB_BROKER_WORKER_ARG) {
+		// Worker selectors must dispatch before the normal command graph loads.
+		const { startHubBrokerFromEnvironment } = await import("./irc/remote/broker");
+		await startHubBrokerFromEnvironment();
 		return true;
 	}
 	if (arg === DAEMON_BROKER_WORKER_ARG) {

@@ -327,15 +327,31 @@ export class AgentRegistry {
 		return [...this.#refs.values()];
 	}
 
+	/** Remote peers reported by the system-scope hub broker; merged when present. */
+	#hubPeers: AgentRef[] = [];
+
+	/**
+	 * Merge a broker roster snapshot (other processes' agents) into the peer
+	 * view. Snapshots are read-only overlays: they never enter `#refs`, never
+	 * emit events, and are dropped wholesale on the next `#hubPeers` write.
+	 */
+	setHubPeers(peers: AgentRef[]): void {
+		this.#hubPeers = peers;
+	}
+
 	/**
 	 * Returns every alive agent (running | idle) except the caller. Advisor refs
 	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Flat namespace: every other agent is visible. Broker roster peers
+	 * (system scope) are merged in when present.
 	 */
 	listVisibleTo(id: string): AgentRef[] {
-		return this.list().filter(
+		const local = this.list().filter(
 			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
 		);
+		if (this.#hubPeers.length === 0) return local;
+		const localIds = new Set(local.map(ref => ref.id));
+		return [...local, ...this.#hubPeers.filter(ref => ref.id !== id && !localIds.has(ref.id))];
 	}
 
 	/** Whether a ref's claimed running state is corroborated by its attached live session. */

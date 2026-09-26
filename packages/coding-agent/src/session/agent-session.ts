@@ -124,6 +124,8 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
+import { cfgHubSystemScopeEnabled, cfgHubSystemScopeSocketPath } from "../hub/settings";
+import { configureHub } from "../irc/remote/hub-manager";
 import type { Settings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
@@ -1413,6 +1415,13 @@ export class AgentSession implements SettingsScope {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		// Arm the system-scope hub (opt-in). Disabled (default) is a no-op: no
+		// socket, no daemon, zero new surface. The connection itself is lazy —
+		// the first hub send/roster triggers it with fail-open fallbacks.
+		configureHub({
+			enabled: cfgHubSystemScopeEnabled.get(this.settings),
+			socketPath: cfgHubSystemScopeSocketPath.get(this.settings),
+		});
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
