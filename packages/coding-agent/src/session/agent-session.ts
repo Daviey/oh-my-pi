@@ -1427,20 +1427,45 @@ export class AgentSession implements SettingsScope {
 			area: cfgHubArea.get(this.settings),
 		});
 		IrcBus.global().setHubRequestHandler(async (msg: IrcMessage) => {
-			// Session-steering path: inject the request as an IRC message so the
-			// normal wake/steer machinery handles it (idle wake turn, mid-turn
-			// steer, or queued interrupt — matching hub deliverIrcMessage).
-			// The agent's reply is relayed back asynchronously as a hub publish
-			// addressed to the requester; the immediate RPC reply is the receipt.
-			const receipt = await this.deliverIrcMessage(msg);
-			return {
-				body: `[rpc-accepted: ${receipt}]`,
-				from: msg.to,
-				to: msg.from,
-				id: `rpc-ack-${msg.id}`,
-				ts: Date.now(),
-				replyTo: msg.id,
-			};
+			// Blocking request/reply over hub RPC — mirrors executeRequest's
+			// correlated-reply wait (messaging.ts): deliver the request as a
+			// wake-relay IRC message so the agent runs a REAL session turn
+			// (context updates, tools execute, UI shows the exchange), then
+			// block until the wake-turn relay sends the answer back with
+			// replyTo === msg.id (relayWakeTurnOutput → bus.send). The RPC
+			// reply frame carries the agent's actual turn output.
+			const bus = IrcBus.global();
+			const requestId = msg.id ?? `rpc-${Date.now()}`;
+			const requestMessage = { ...msg, id: requestId };
+			let resolveReply!: (reply: IrcMessage | null) => void;
+			const replyPromise = new Promise<IrcMessage | null>(resolve => {
+				resolveReply = resolve;
+			});
+			const timeout = setTimeout(() => resolveReply(null), 120_000);
+			const unsubscribe = bus.onSend(sent => {
+				if (sent.replyTo === requestId && sent.from === msg.to) {
+					clearTimeout(timeout);
+					resolveReply(sent);
+				}
+			});
+			try {
+				await this.deliverIrcMessage({ ...requestMessage, wakeRelay: true });
+				const reply = await replyPromise;
+				if (!reply) {
+					return {
+						body: "[rpc-timeout: no reply within 120s — the turn may still complete; check the session]",
+						from: msg.to,
+						to: msg.from,
+						id: `rpc-ack-${requestId}`,
+						ts: Date.now(),
+						replyTo: requestId,
+					};
+				}
+				return reply;
+			} finally {
+				unsubscribe();
+				clearTimeout(timeout);
+			}
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they
 		// are on the roster (and hear deliveries) before their first hub op.

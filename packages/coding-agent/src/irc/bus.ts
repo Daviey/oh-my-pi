@@ -44,6 +44,10 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	/** Send observers: fire-and-forget taps on every outgoing message (used by
+	 *  the hub RPC handler to capture the wake-turn relay reply). */
+	#sendListeners: ((message: IrcMessage) => void)[] = [];
+
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
 	/** System-scope hub client when attached; null keeps delivery strictly in-process. */
@@ -101,6 +105,13 @@ export class IrcBus {
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		for (const listener of [...this.#sendListeners]) {
+			try {
+				listener(message);
+			} catch {
+				// Observer failures never block the send path.
+			}
+		}
 		// Local recipients take the in-process path synchronously — no await
 		// before #deliver, so park cancel-window timing is unchanged (the hub
 		// adds zero ticks to today's behavior). Only unknown ids consult the hub.
@@ -118,6 +129,16 @@ export class IrcBus {
 			sent.set(message.to, message.ts);
 		}
 		return receipt;
+	}
+
+	/** Observe every outgoing send (fire-and-forget; listener errors are
+	 *  swallowed). Returns an unsubscribe function. */
+	onSend(listener: (message: IrcMessage) => void): () => void {
+		this.#sendListeners.push(listener);
+		return () => {
+			const index = this.#sendListeners.indexOf(listener);
+			if (index !== -1) this.#sendListeners.splice(index, 1);
+		};
 	}
 
 	/**
