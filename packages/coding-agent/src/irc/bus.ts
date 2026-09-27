@@ -11,7 +11,7 @@
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
-import type { HubClient } from "./remote/client";
+import type { HubClientLike } from "./remote/client";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
@@ -47,7 +47,7 @@ export class IrcBus {
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
 	/** System-scope hub client when attached; null keeps delivery strictly in-process. */
-	#hubClient: HubClient | null = null;
+	#hubClient: HubClientLike | null = null;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -63,7 +63,7 @@ export class IrcBus {
 	 * broadcast fan-out gains broker roster peers. Disabled/unreachable hub
 	 * never reaches this path.
 	 */
-	attachHubClient(client: HubClient): void {
+	attachHubClient(client: HubClientLike): void {
 		this.#hubClient = client;
 		client.onDelivery(msg => {
 			// Relay re-enters the local machinery; never echo back over the socket.

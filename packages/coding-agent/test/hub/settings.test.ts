@@ -6,13 +6,13 @@ describe("hub transport settings", () => {
 		it("unix is implemented", () => {
 			expect(resolveHubTransport("unix")).toEqual({ kind: "unix", implemented: true });
 		});
-		it("mqtt and redis are declared but unimplemented", () => {
-			expect(resolveHubTransport("mqtt")).toEqual({ kind: "mqtt", implemented: false });
+		it("mqtt is implemented; redis stays declared-only", () => {
+			expect(resolveHubTransport("mqtt")).toEqual({ kind: "mqtt", implemented: true });
 			expect(resolveHubTransport("redis")).toEqual({ kind: "redis", implemented: false });
 		});
 		it("trims and case-folds configured values", () => {
 			expect(resolveHubTransport("  UNIX ")).toEqual({ kind: "unix", implemented: true });
-			expect(resolveHubTransport("MQTT")).toEqual({ kind: "mqtt", implemented: false });
+			expect(resolveHubTransport("MQTT")).toEqual({ kind: "mqtt", implemented: true });
 		});
 		it("unknown values fail CLOSED on the declared kind — never silent unix", () => {
 			const resolved = resolveHubTransport("carrier-pigeon");

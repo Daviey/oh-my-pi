@@ -124,7 +124,7 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
-import { cfgHubRemoteUrl, cfgHubSystemScopeEnabled, cfgHubSystemScopeSocketPath, cfgHubTransport } from "../hub/settings";
+import { cfgHubArea, cfgHubRemoteUrl, cfgHubSystemScopeEnabled, cfgHubSystemScopeSocketPath, cfgHubTransport } from "../hub/settings";
 import { configureHub, ensureHubClient } from "../irc/remote/hub-manager";
 import type { Settings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
@@ -1423,6 +1423,7 @@ export class AgentSession implements SettingsScope {
 			socketPath: cfgHubSystemScopeSocketPath.get(this.settings),
 			transport: cfgHubTransport.get(this.settings),
 			remoteUrl: cfgHubRemoteUrl.get(this.settings),
+			area: cfgHubArea.get(this.settings),
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they
 		// are on the roster (and hear deliveries) before their first hub op.

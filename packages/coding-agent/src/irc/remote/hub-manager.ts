@@ -12,12 +12,14 @@ import * as fs from "node:fs/promises";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { logger } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import { HubClient } from "./client";
+import { HubClient, type HubClientLike } from "./client";
+import { MqttHubClient } from "./mqtt";
 import { hubProjectNamespace } from "./broker";
-import { resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
+import { IrcBus } from "../bus";
+import { resolveHubArea, resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
 
-let current: HubClient | null = null;
-let starting: Promise<HubClient | null> | null = null;
+let current: HubClientLike | null = null;
+let starting: Promise<HubClientLike | null> | null = null;
 let enabled = false;
 let socketPath = "";
 let armed = false;
@@ -28,7 +30,7 @@ export function isHubEnabled(): boolean {
 }
 
 /** Current hub client when connected; null while disabled, connecting, or unreachable. */
-export function currentHubClient(): HubClient | null {
+export function currentHubClient(): HubClientLike | null {
 	return current;
 }
 
@@ -61,6 +63,8 @@ export function configureHub(options: {
 	socketPath: string;
 	transport?: string;
 	remoteUrl?: string;
+	/** Named topic namespace for non-unix transports (resolved + stored). */
+	area?: string;
 }): void {
 	if (armed && (enabled || !options.enabled)) return;
 	armed = true;
@@ -68,6 +72,7 @@ export function configureHub(options: {
 	socketPath = resolveHubSocketPath(options.socketPath, getAgentDir());
 	transport = resolveHubTransport(options.transport ?? "unix");
 	remoteUrl = options.remoteUrl?.trim() || "";
+	area = resolveHubArea(options.area ?? "");
 }
 
 /**
@@ -81,6 +86,8 @@ let retryTimer: ReturnType<typeof setTimeout> | undefined;
 /** Resolved transport (fail-closed for unimplemented kinds — see resolveHubTransport). */
 let transport: { kind: string; implemented: boolean } = { kind: "unix", implemented: true };
 let remoteUrl = "";
+/** Resolved hub area (named topic namespace for mqtt). */
+let area = "";
 
 function scheduleHubRetry(): void {
 	if (!enabled || current || starting) return;
@@ -97,7 +104,7 @@ function scheduleHubRetry(): void {
  * Connect (and register this process under the main agent id) when armed.
  * Resolves null when disabled or unreachable within the client timeout.
  */
-export async function ensureHubClient(): Promise<HubClient | null> {
+export async function ensureHubClient(): Promise<HubClientLike | null> {
 	if (!enabled) return null;
 	if (current) return current;
 	// Fail-closed for schema-declared-but-unimplemented transports: config is
@@ -111,34 +118,21 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 		enabled = false;
 		return null;
 	}
+	if (transport.kind === "mqtt" && !remoteUrl) {
+		// Implemented transport without its required URL: same fail-closed
+		// shape (typed log, self-disable) so retry ladders never spin on a
+		// config that can never connect.
+		logger.warn("hub: mqtt transport requires hub.remoteUrl; hub disabled for this session");
+		enabled = false;
+		return null;
+	}
 	if (!starting) {
 		// See RETRY_DELAYS_MS below: failures back off, successes reset.
-		starting = HubClient.connect({
-			socketPath,
-			identity: {
-				agentId: MAIN_AGENT_ID,
-				project: hubProjectNamespace(process.cwd()),
-				status: "running",
-				pid: process.pid,
-				// Main agents are generalists; their project context IS their
-				// static specialism (answers "who is working on X" from the
-				// roster alone). Spawned specialists set their own via task name.
-				specialism: path.basename(path.resolve(process.cwd())) || undefined,
-			},
-		})
+		starting = connectTransport()
 			.then(async client => {
 				if (client) {
 					retryAttempt = 0;
-					const { IrcBus } = await import("../bus");
-					IrcBus.global().attachHubClient(client);
-					startStatusSync(client);
-					// Broker died (idle-exit/crash): drop the cached client and
-					// schedule a reconnect — a session must not silently fall
-					// off the bus after one disconnect.
-					client.onClose(() => {
-						if (current === client) current = null;
-						scheduleHubRetry();
-					});
+					attachHubClient(client);
 				} else {
 					// Startup-race loser (spawn deadline hit): retry on backoff
 					// instead of staying unsubscribed until a manual hub op.
@@ -155,6 +149,42 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 	return starting;
 }
 
+/** Connect via the armed transport (unix default; mqtt when configured). */
+function connectTransport(): Promise<HubClientLike | null> {
+	if (transport.kind === "mqtt") {
+		return MqttHubClient.connect({ url: remoteUrl, area, identity: mainIdentity() });
+	}
+	return HubClient.connect({ socketPath, identity: mainIdentity() });
+}
+
+/** This process's registration under the main agent id. */
+function mainIdentity() {
+	return {
+		agentId: MAIN_AGENT_ID,
+		project: hubProjectNamespace(process.cwd()),
+		status: "running" as const,
+		pid: process.pid,
+		// Main agents are generalists; their project context IS their
+		// static specialism (answers "who is working on X" from the
+		// roster alone). Spawned specialists set their own via task name.
+		specialism: path.basename(path.resolve(process.cwd())) || undefined,
+	};
+}
+
+/** Post-connect wiring shared by every transport: bus attachment, status
+ *  mirror, and the drop-and-retry handler for a dead broker connection. */
+function attachHubClient(client: HubClientLike): void {
+	IrcBus.global().attachHubClient(client);
+	startStatusSync(client);
+	// Broker died (idle-exit/crash): drop the cached client and
+	// schedule a reconnect — a session must not silently fall
+	// off the bus after one disconnect.
+	client.onClose(() => {
+		if (current === client) current = null;
+		scheduleHubRetry();
+	});
+}
+
 /** Active registry→hub status mirror; replaced on reconnect, torn down on shutdown. */
 let statusSyncUnsubscribe: (() => void) | undefined;
 
@@ -165,7 +195,7 @@ const STATUS_SYNC_MIN_INTERVAL_MS = 5_000;
 
 /** Mirror this process's main-agent registry ref into hub status frames:
  *  run-state flips immediately, activity gist debounced (on-change, floor). */
-function startStatusSync(client: HubClient): void {
+function startStatusSync(client: HubClientLike): void {
 	statusSyncUnsubscribe?.();
 	const lastSent = new Map<string, { status: string; activity?: string; at: number }>();
 	const unsub = AgentRegistry.global().onChange(event => {
@@ -228,4 +258,5 @@ export function resetHubForTests(): void {
 	socketPath = "";
 	transport = { kind: "unix", implemented: true };
 	remoteUrl = "";
+	area = "";
 }

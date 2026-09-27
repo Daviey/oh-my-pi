@@ -78,6 +78,17 @@ export type HubServerFrame =
 	| { type: "bye" }
 	| { type: "error"; message: string; code?: "unsupported-version" };
 
+/** Whether a roster row satisfies a publish target: agentId must match
+ *  exactly; `project` (when set) narrows to that namespace and `pid` (when
+ *  set) narrows same-id registrations to one process. Shared by the unix
+ *  broker's fan-out and the mqtt client's receive-side self-addressing. */
+export function hubTargetMatches(target: HubTarget, entry: { agentId: string; project: string; pid: number }): boolean {
+	if (target.agentId !== entry.agentId) return false;
+	if (target.project !== undefined && target.project !== entry.project) return false;
+	if (typeof target.pid === "number" && entry.pid !== target.pid) return false;
+	return true;
+}
+
 /** Encode one frame as a newline-terminated JSON line. */
 export function encodeFrame(frame: HubClientFrame | HubServerFrame): string {
 	return `${JSON.stringify(frame)}\n`;

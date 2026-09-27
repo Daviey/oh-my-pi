@@ -61,6 +61,18 @@ export interface HubPublishResult {
 	results: { to: string; ok: boolean; error?: string }[];
 }
 
+/** Structural hub-client surface: the unix {@link HubClient} and the mqtt
+ *  {@link MqttHubClient} both satisfy it, so hub-manager/IrcBus can hold
+ *  either transport behind one type. */
+export interface HubClientLike {
+	roster(): Promise<HubRosterEntry[]>;
+	publish(msg: IrcMessage, targets: HubTarget[]): Promise<HubPublishResult | null>;
+	setStatus(status: "running" | "idle", activity?: string): Promise<void>;
+	onDelivery(sink: (msg: IrcMessage) => void): void;
+	onClose(handler: () => void): void;
+	close(): void;
+}
+
 type Waiter = { resolve: (frame: HubServerFrame) => void };
 
 /**

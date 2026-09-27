@@ -7,7 +7,7 @@ afterEach(() => {
 
 describe("hub transport gate (fail-closed)", () => {
 	it("unimplemented transport config: ensureHubClient resolves null, hub self-disables", async () => {
-		configureHub({ enabled: true, socketPath: "/tmp/hub-gate-test.sock", transport: "mqtt", remoteUrl: "mqtt://pico:1883" });
+		configureHub({ enabled: true, socketPath: "/tmp/hub-gate-test.sock", transport: "redis", remoteUrl: "redis://pico:6379" });
 		expect(isHubEnabled()).toBe(true);
 		const client = await ensureHubClient();
 		expect(client).toBeNull();
@@ -23,8 +23,15 @@ describe("hub transport gate (fail-closed)", () => {
 		expect(isHubEnabled()).toBe(false);
 	});
 
-	it("empty remoteUrl with non-unix transport: still fail-closed", async () => {
-		configureHub({ enabled: true, socketPath: "/tmp/hub-gate-test.sock", transport: "redis", remoteUrl: "" });
+	it("empty remoteUrl with mqtt transport: still fail-closed", async () => {
+		configureHub({ enabled: true, socketPath: "/tmp/hub-gate-test.sock", transport: "mqtt", remoteUrl: "" });
+		const client = await ensureHubClient();
+		expect(client).toBeNull();
+		expect(isHubEnabled()).toBe(false);
+	});
+
+	it("mqtt without remoteUrl resolves null without touching the broker", async () => {
+		configureHub({ enabled: true, socketPath: "/tmp/hub-gate-test.sock", transport: "mqtt", remoteUrl: "   " });
 		const client = await ensureHubClient();
 		expect(client).toBeNull();
 	});

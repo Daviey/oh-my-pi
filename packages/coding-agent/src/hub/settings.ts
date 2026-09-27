@@ -30,9 +30,10 @@ export const cfgHubTransport = register({
 		group: "Hub",
 		label: "Hub Transport",
 		description:
-			"unix = built-in same-host broker (default). mqtt / redis = bridge the local broker to a " +
-			"network broker for cross-system scopes. Non-unix transports are schema-declared but not " +
-			"implemented yet: config is accepted, connection fails closed with a logged error.",
+			"unix = built-in same-host broker (default). mqtt = authenticated network broker for " +
+			"cross-system scopes (credentials via OMP_HUB_MQTT_USERNAME/PASSWORD or mqtt://user:pass@host; " +
+			"topics namespaced by hub.area). redis remains schema-declared: accepted in config, " +
+			"connection fails closed with a logged error.",
 	},
 });
 
@@ -52,6 +53,20 @@ export const cfgHubRemoteUrl = register({
 	},
 });
 
+export const cfgHubArea = register({
+	id: "hub.area",
+	type: "string",
+	default: "",
+	ui: {
+		tab: "interaction",
+		group: "Hub",
+		label: "Hub Area",
+		description:
+			"Named topic namespace on the shared broker (non-unix transports). Peers only see " +
+			"each other when configured into the same area; empty uses \"default\".",
+	},
+});
+
 export const cfgHubSystemScopeSocketPath = register({
 	id: "hub.systemScope.socketPath",
 	type: "string",
@@ -67,11 +82,20 @@ export const cfgHubSystemScopeSocketPath = register({
 	},
 });
 
+/** Default area when `hub.area` is empty. */
+export const DEFAULT_HUB_AREA = "default";
+
+/** Resolve the hub area: trimmed configured value, or "default" when empty. */
+export function resolveHubArea(value: string): string {
+	const trimmed = value.trim();
+	return trimmed || DEFAULT_HUB_AREA;
+}
+
 /** Hub transports. `unix` = the built-in per-user broker over a local unix
- *  socket (SO_PEERCRED trust, same-host only). The remote kinds (mqtt, redis)
- *  bridge the local broker to a network broker so scopes extend across
- *  systems — schema v1's versioning/capabilities gate that path. New kinds
- *  are additive: unknown configured values fail closed at connect. */
+ *  socket (SO_PEERCRED trust, same-host only). `mqtt` extends scopes across
+ *  systems via an authenticated MQTT broker (credentials from env vars or
+ *  URL userinfo only; all topics namespaced under `hub.area`). `redis`
+ *  remains schema-declared only. Unknown configured values fail closed. */
 export type HubTransportKind = "unix" | "mqtt" | "redis";
 
 export const HUB_TRANSPORT_KINDS: readonly HubTransportKind[] = ["unix", "mqtt", "redis"];
@@ -82,8 +106,8 @@ export function resolveHubSocketPath(configured: string, agentDir: string): stri
 	return value || path.join(agentDir, "hub.sock");
 }
 
-/** Validate a configured transport kind; `unix` is the only implemented kind
- *  today — others are accepted in config (forward-declared schema) but the
+/** Validate a configured transport kind; `unix` and `mqtt` are implemented —
+ *  others (redis) are accepted in config (forward-declared schema) but the
  *  client refuses to connect and logs a typed error, fail-closed. */
 export function resolveHubTransport(kind: string): { kind: string; implemented: boolean } {
 	const value = kind.trim().toLowerCase();
@@ -95,5 +119,5 @@ export function resolveHubTransport(kind: string): { kind: string; implemented: 
 		// union) — unknown values must survive for the typed error log.
 		return { kind: value, implemented: false };
 	}
-	return { kind: value, implemented: value === "unix" };
+	return { kind: value, implemented: value === "unix" || value === "mqtt" };
 }

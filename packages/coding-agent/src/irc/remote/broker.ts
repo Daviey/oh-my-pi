@@ -17,6 +17,7 @@ import type { dlopen as dlopenType, FFIType as ffiTypeType } from "bun:ffi";
 import {
 	encodeFrame,
 	FrameStream,
+	hubTargetMatches,
 	HUB_PROTOCOL_VERSION,
 	type HubClientFrame,
 	type HubRosterEntry,
@@ -339,13 +340,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 							if (record.entry.agentId === target.agentId) candidates.push(record);
 						}
 					}
-					let matches =
-						target.project !== undefined
-							? candidates.filter(candidate => candidate.entry.project === target.project)
-							: candidates;
-					if (typeof target.pid === "number") {
-						matches = matches.filter(candidate => candidate.entry.pid === target.pid);
-					}
+					const matches = candidates.filter(candidate => hubTargetMatches(target, candidate.entry));
 					const conns = new Set<ClientConn>();
 					for (const candidate of matches) {
 						if (candidate.conn !== conn) {

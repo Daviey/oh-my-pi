@@ -5,6 +5,7 @@
 ### Added
 
 - Added an optional `scope` to the `retain` and `learn` tools, offered when `mnemopi.scoping` is `global` or `per-project-tagged`: `scope: "global"` stores a memory or lesson in the Mnemopi bank every project recalls instead of the current project's bank ([#13324](https://github.com/can1357/oh-my-pi/pull/13324) by [@alphastorm](https://github.com/alphastorm)).
+- Added an authenticated MQTT transport for the system-scope hub (`hub.transport: "mqtt"`): sessions on different machines join the same peer bus through a shared broker instead of the local unix-socket daemon. Credentials come only from `OMP_HUB_MQTT_USERNAME`/`OMP_HUB_MQTT_PASSWORD` or `mqtt://user:pass@host` userinfo (never config values — anonymous connect fails closed). All topics live under a named area (`hub.area`, default `"default"`) — `hub/<area>/frames` carries the same NDJSON frames with id-correlated publish acks, `hub/<area>/presence/<agentId>` retains each peer's roster entry with an empty-payload LWT clear, and receive-side target matching (agentId plus optional pid) mirrors the unix broker via the shared `hubTargetMatches` helper.
 
 ### Fixed
 
