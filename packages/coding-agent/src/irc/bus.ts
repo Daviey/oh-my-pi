@@ -69,6 +69,17 @@ export class IrcBus {
 			// Relay re-enters the local machinery; never echo back over the socket.
 			void this.#deliver(msg, { suppressRelay: false });
 		});
+		// Transport-level RPC sink; the agent-side handler registers via
+		// {@link setHubRequestHandler} (no turn-logic wiring here).
+		client.onRequest((msg, from) => this.#hubRequestHandler?.(msg, from) ?? null);
+	}
+
+	/** Registered peer-request handler; null = this process declines all. */
+	#hubRequestHandler: ((msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null) | undefined;
+
+	/** Register (or clear with null) the handler answering peer RPC requests. */
+	setHubRequestHandler(handler: ((msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null) | null): void {
+		this.#hubRequestHandler = handler ?? undefined;
 	}
 
 	/**

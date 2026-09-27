@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { dlopen as dlopenType, FFIType as ffiTypeType } from "bun:ffi";
 import {
+	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
 	FrameStream,
 	hubTargetMatches,
@@ -191,6 +192,10 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 
 
 	const connections = new Set<ClientConn>();
+	// Request/reply RPC: requester connections keyed by correlation id, with
+	// TTL cleanup. Stateless-per-frame otherwise: the request frame carries
+	// everything needed to relay; only replies consult this map.
+	const pendingRequests = new Map<string, { conn: ClientConn; timer: NodeJS.Timeout }>();
 	// Keyed by project + agentId: agent ids are only unique within a process
 	// (every process's main agent is the same constant), so bare keys would let
 	// two projects' "main" evict each other from the roster.
@@ -240,6 +245,12 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 
 	function dropConnection(conn: ClientConn): void {
 		if (!connections.delete(conn)) return;
+		// Purge this connection's in-flight RPC waits (no socket to route to).
+		for (const [id, pending] of pendingRequests) {
+			if (pending.conn !== conn) continue;
+			clearTimeout(pending.timer);
+			pendingRequests.delete(id);
+		}
 		for (const [key, records] of rosterByAgent) {
 			for (const record of records) {
 				if (record.conn === conn) records.delete(record);
@@ -254,7 +265,12 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 		conn.socket.write(encodeFrame(frame) as string);
 	}
 
-	function handleFrame(conn: ClientConn, frame: Exclude<HubClientFrame, { type: "error" }>): void {
+	function handleFrame(
+		conn: ClientConn,
+		// `reply` is client→broker here: the answering peer sends it up and the
+		// broker routes it back to the requester's connection.
+		frame: Exclude<HubClientFrame | HubServerFrame, { type: "error" }>,
+	): void {
 		switch (frame.type) {
 			case "hello": {
 				// Protocol version gate: major mismatch is a typed rejection so
@@ -376,6 +392,52 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				send(conn, { type: "publishAck", id: frame.msg?.id ?? "", results });
 				break;
 			}
+			case "request": {
+				// Relay like publish (same target matcher), but deliver-style:
+				// matching peers receive a `request` frame and answer via
+				// `reply`; the broker routes replies back by correlation id.
+				// No ack: a miss just times out at the requester.
+				const deliverConns = new Set<ClientConn>();
+				const targets = "targets" in frame ? frame.targets : [];
+				for (const target of targets) {
+					if (typeof target?.agentId !== "string" || !target.agentId) continue;
+					for (const records of rosterByAgent.values()) {
+						for (const record of records) {
+							if (record.conn === conn) continue;
+							if (record.entry.agentId === target.agentId && hubTargetMatches(target, record.entry)) {
+								deliverConns.add(record.conn);
+							}
+						}
+					}
+				}
+				if (deliverConns.size > 0) {
+					const requested = "timeoutMs" in frame ? frame.timeoutMs : undefined;
+					const ttl = typeof requested === "number" && requested > 0 ? requested : DEFAULT_REQUEST_TIMEOUT_MS;
+					const timer = setTimeout(() => pendingRequests.delete(frame.id), ttl + 1_000);
+					timer.unref?.();
+					pendingRequests.set(frame.id, { conn, timer });
+					for (const targetConn of deliverConns) {
+						try {
+							send(targetConn, { type: "request", id: frame.id, msg: frame.msg });
+						} catch {
+							// dead peer connection: the remaining peers still answer
+						}
+					}
+				}
+				break;
+			}
+			case "reply": {
+				// Route back along the requester's connection; first reply
+				// wins (the client deletes its waiter, later replies no-op).
+				const pending = pendingRequests.get(frame.id);
+				if (!pending) break;
+				try {
+					send(pending.conn, { type: "reply", id: frame.id, from: frame.from, msg: frame.msg });
+				} catch {
+					// requester gone; entry TTLs out
+				}
+				break;
+			}
 			case "ping": {
 				send(conn, { type: "pong" });
 				break;
@@ -408,7 +470,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 					logger.debug("hub broker: malformed frame from peer", { socketPath });
 					continue;
 				}
-				handleFrame(conn, frame as Exclude<HubClientFrame, { type: "error" }>);
+				handleFrame(conn, frame as Exclude<HubClientFrame | HubServerFrame, { type: "error" }>);
 			}
 		});
 		socket.on("close", () => dropConnection(conn));

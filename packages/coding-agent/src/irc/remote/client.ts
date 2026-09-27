@@ -6,10 +6,12 @@
  * request is bounded by a short timeout.
  */
 import * as net from "node:net";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import {
 	DEFAULT_HUB_IDLE_GRACE_MS,
+	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
 	FrameStream,
 	HUB_IDLE_GRACE_ENV,
@@ -56,6 +58,16 @@ export interface HubClientOptions {
 	idleGraceMs?: number;
 }
 
+/** A correlated RPC answer: who answered and what they said. */
+export interface HubRequestResult {
+	from: string;
+	msg: IrcMessage;
+}
+
+/** Handler for peer requests addressed to this identity. Return the reply
+ *  `IrcMessage`, or null to decline (no reply sent; other peers may answer). */
+export type HubRequestHandler = (msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null;
+
 /** Delivered cross-process message plus the broker's publish outcome. */
 export interface HubPublishResult {
 	results: { to: string; ok: boolean; error?: string }[];
@@ -67,6 +79,11 @@ export interface HubPublishResult {
 export interface HubClientLike {
 	roster(): Promise<HubRosterEntry[]>;
 	publish(msg: IrcMessage, targets: HubTarget[]): Promise<HubPublishResult | null>;
+	/** Transmit an RPC request to matching peers and await the first
+	 *  correlated reply; null on timeout or when no peer answers. */
+	request(msg: IrcMessage, targets: HubTarget[], timeoutMs?: number): Promise<HubRequestResult | null>;
+	/** Register (or clear with null) this client's peer-request handler. */
+	onRequest(handler: HubRequestHandler | null): void;
 	setStatus(status: "running" | "idle", activity?: string): Promise<void>;
 	onDelivery(sink: (msg: IrcMessage) => void): void;
 	onClose(handler: () => void): void;
@@ -85,6 +102,8 @@ export class HubClient {
 	#frames = new FrameStream();
 	#pending = new Map<string, Waiter[]>();
 	#deliveries: ((msg: IrcMessage) => void) | undefined;
+	#requestSink: HubRequestHandler | undefined;
+	#replies = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
 	#onClose: (() => void) | undefined;
@@ -134,6 +153,32 @@ export class HubClient {
 	async publish(msg: IrcMessage, targets: HubTarget[]): Promise<HubPublishResult | null> {
 		const frame = await this.#request({ type: "publish", msg, targets });
 		return frame?.type === "publishAck" ? { results: frame.results } : null;
+	}
+
+	/**
+	 * Transmit a request to specific recipients and await the first
+	 * correlated reply (broker relays to matching peers; each peer's
+	 * {@link onRequest} handler may answer). Resolves null on timeout or
+	 * when no reachable peer exists, mirroring publish's null-on-miss.
+	 */
+	async request(msg: IrcMessage, targets: HubTarget[], timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS): Promise<HubRequestResult | null> {
+		const socket = this.#socket;
+		if (!socket || this.#closed) return null;
+		const id = `rpc-${randomUUID()}`;
+		const { promise, resolve } = Promise.withResolvers<HubRequestResult | null>();
+		const timer = setTimeout(() => {
+			this.#replies.delete(id);
+			resolve(null);
+		}, timeoutMs);
+		timer.unref?.();
+		this.#replies.set(id, { resolve, timer });
+		socket.write(encodeFrame({ type: "request", id, msg, targets, timeoutMs }) as string);
+		return promise;
+	}
+
+	/** Register the local handler for broker-relayed peer requests. */
+	onRequest(handler: HubRequestHandler | null): void {
+		this.#requestSink = handler ?? undefined;
 	}
 
 	/** Update this process's roster status + current-work gist (activity is
@@ -233,12 +278,44 @@ export class HubClient {
 				this.#deliveries?.(frame.msg);
 				break;
 			}
+			case "reply": {
+				const waiter = this.#replies.get(frame.id);
+				if (!waiter) break; // late/foreign reply: requester already timed out
+				this.#replies.delete(frame.id);
+				clearTimeout(waiter.timer);
+				waiter.resolve({ from: frame.from, msg: frame.msg });
+				break;
+			}
+			case "request": {
+				void this.#answerRequest(frame);
+				break;
+			}
 			default: {
 				const waiters = this.#pending.get(frame.type);
 				const waiter = waiters?.shift();
 				if (waiters && waiters.length === 0) this.#pending.delete(frame.type);
 				waiter?.resolve(frame);
 			}
+		}
+	}
+
+	/** Run the peer-request handler and send its answer back through the
+	 *  broker. A null/throwing handler declines silently (no reply frame). */
+	async #answerRequest(frame: Extract<HubServerFrame, { type: "request" }>): Promise<void> {
+		const handler = this.#requestSink;
+		if (!handler) return;
+		let answer: IrcMessage | null = null;
+		try {
+			answer = (await handler(frame.msg, frame.msg?.from ?? "")) ?? null;
+		} catch {
+			answer = null;
+		}
+		const socket = this.#socket;
+		if (!answer || !socket || this.#closed) return;
+		try {
+			socket.write(encodeFrame({ type: "reply", id: frame.id, from: this.#identity?.agentId ?? "", msg: answer }) as string);
+		} catch {
+			// best-effort answer; the requester times out without it
 		}
 	}
 
@@ -284,6 +361,12 @@ export class HubClient {
 		for (const [type, waiters] of this.#pending) {
 			for (const waiter of waiters) waiter.resolve({ type: "error", message: error.message });
 			this.#pending.delete(type);
+		}
+		// In-flight RPCs fail open (null) when the broker connection dies.
+		for (const [id, waiter] of this.#replies) {
+			this.#replies.delete(id);
+			clearTimeout(waiter.timer);
+			waiter.resolve(null);
 		}
 	}
 }

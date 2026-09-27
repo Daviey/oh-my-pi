@@ -35,6 +35,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type * as MqttModule from "mqtt";
 import { resolveHubArea } from "../../hub/settings";
 import {
+	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
 	FrameStream,
 	hubTargetMatches,
@@ -43,7 +44,7 @@ import {
 	type HubServerFrame,
 	type HubTarget,
 } from "./protocol";
-import type { HubAgentIdentity, HubClientLike, HubPublishResult } from "./client";
+import type { HubAgentIdentity, HubClientLike, HubPublishResult, HubRequestHandler, HubRequestResult } from "./client";
 
 /** Env vars carrying broker credentials. Secrets never live in config values. */
 export const OMP_HUB_MQTT_USERNAME_ENV = "OMP_HUB_MQTT_USERNAME";
@@ -161,6 +162,9 @@ export class MqttHubClient implements HubClientLike {
 	/** Message ids this process published (self-echo suppression). */
 	#selfPublishes = new Set<string>();
 	#deliveries: ((msg: IrcMessage) => void) | undefined;
+	/** In-flight RPC requests keyed by correlation id; first reply resolves. */
+	#rpcWaits = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
+	#requestSink: HubRequestHandler | undefined;
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
 	#onClose: (() => void) | undefined;
@@ -214,6 +218,11 @@ export class MqttHubClient implements HubClientLike {
 		connected.on("message", (topic, payload) => this.#onMessage(topic, payload));
 		connected.on("close", () => {
 			this.#flushPendingAcks();
+			for (const [id, waiter] of this.#rpcWaits) {
+				this.#rpcWaits.delete(id);
+				clearTimeout(waiter.timer);
+				waiter.resolve(null);
+			}
 			this.#onClose?.();
 		});
 		connected.on("error", () => {
@@ -272,6 +281,38 @@ export class MqttHubClient implements HubClientLike {
 		return promise;
 	}
 
+	/**
+	 * Transmit a request on the shared frames topic and await the first
+	 * correlated reply. Every area peer sees the frame; those whose
+	 * {@link onRequest} handler matches answer with a `reply` frame keyed by
+	 * the correlation id. Null on timeout (no answering peer).
+	 */
+	async request(msg: IrcMessage, targets: HubTarget[], timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS): Promise<HubRequestResult | null> {
+		const client = this.#client;
+		if (!client || this.#closed) return null;
+		const id = `rpc-${globalThis.crypto.randomUUID()}`;
+		const { promise, resolve } = Promise.withResolvers<HubRequestResult | null>();
+		const timer = setTimeout(() => {
+			this.#rpcWaits.delete(id);
+			resolve(null);
+		}, timeoutMs);
+		timer.unref?.();
+		this.#rpcWaits.set(id, { resolve, timer });
+		try {
+			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs }), { qos: 1 });
+		} catch {
+			this.#rpcWaits.delete(id);
+			clearTimeout(timer);
+			return null;
+		}
+		return promise;
+	}
+
+	/** Register the local handler for peer requests addressed to this identity. */
+	onRequest(handler: HubRequestHandler | null): void {
+		this.#requestSink = handler ?? undefined;
+	}
+
 	/** Refresh retained presence with the new status/activity gist. */
 	async setStatus(status: "running" | "idle", activity?: string): Promise<void> {
 		const identity = this.#identity;
@@ -309,6 +350,11 @@ export class MqttHubClient implements HubClientLike {
 		const identity = this.#identity;
 		this.#identity = undefined;
 		this.#flushPendingAcks();
+		for (const [id, waiter] of this.#rpcWaits) {
+			this.#rpcWaits.delete(id);
+			clearTimeout(waiter.timer);
+			waiter.resolve(null);
+		}
 		if (!client || !identity) return;
 		void (async () => {
 			try {
@@ -362,6 +408,18 @@ export class MqttHubClient implements HubClientLike {
 				this.#onPeerPublish(frame);
 				break;
 			}
+			case "request": {
+				if ("targets" in frame) this.#onPeerRequest(frame);
+				break;
+			}
+			case "reply": {
+				const waiter = this.#rpcWaits.get(frame.id);
+				if (!waiter) return; // late/duplicate reply: already resolved
+				this.#rpcWaits.delete(frame.id);
+				clearTimeout(waiter.timer);
+				waiter.resolve({ from: frame.from, msg: frame.msg });
+				break;
+			}
 			case "publishAck": {
 				const waiter = this.#acks.get(frame.id);
 				if (!waiter) return;
@@ -406,6 +464,37 @@ export class MqttHubClient implements HubClientLike {
 			.catch(() => {
 				// best-effort ack; the sender's request times out without it
 			});
+	}
+
+	/** Receive-side addressing for requests (same matcher as publish): the
+	 *  handler's answer goes back on the frames topic keyed by correlation
+	 *  id. A null/throwing handler declines — no reply frame is published. */
+	#onPeerRequest(frame: Extract<HubClientFrame, { type: "request" }>): void {
+		const identity = this.#identity;
+		const handler = this.#requestSink;
+		if (!identity || !handler) return;
+		if (this.#selfPublishes.has(frame.id)) return; // own request echo
+		const matched = (frame.targets ?? []).some(target => target && hubTargetMatches(target, identity));
+		if (!matched) return;
+		void (async () => {
+			let answer: IrcMessage | null = null;
+			try {
+				answer = (await handler(frame.msg, frame.msg?.from ?? "")) ?? null;
+			} catch {
+				answer = null;
+			}
+			const client = this.#client;
+			if (!answer || !client || this.#closed) return;
+			try {
+				await client.publishAsync(
+					hubFramesTopic(this.area),
+					encodeFrame({ type: "reply", id: frame.id, from: identity.agentId, msg: answer }),
+					{ qos: 1 },
+				);
+			} catch {
+				// best-effort answer; the requester times out without it
+			}
+		})();
 	}
 
 	/** Resolve every in-flight publish with its partial rows (drop/close). */

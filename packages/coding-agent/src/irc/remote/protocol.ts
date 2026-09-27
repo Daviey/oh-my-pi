@@ -18,6 +18,10 @@ export const DEFAULT_HUB_IDLE_GRACE_MS = 30_000;
  *  error frame; minors are additive and ignored by older peers. */
 export const HUB_PROTOCOL_VERSION = 1;
 
+/** Default ms a request/reply RPC waits for a correlated reply before
+ *  resolving null (client request timeout and broker pending-entry TTL). */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
+
 /** Peer client identities. The broker never interprets these — carried and
  *  echoed for consumer-side routing/claim decisions. */
 export type HubClientKind = "omp" | "hermes" | "webhook" | (string & {});
@@ -65,6 +69,10 @@ export type HubClientFrame =
 	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string }
 	| { type: "roster" }
 	| { type: "publish"; msg: IrcMessage; targets: HubTarget[] }
+	/** RPC: transmit `msg` to matching peers and await a correlated reply.
+	 *  `id` is the request correlation id (distinct from any IrcMessage id);
+	 *  answers come back as `reply` frames carrying the same id. */
+	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number }
 	| { type: "ping" }
 	| { type: "bye" };
 
@@ -76,6 +84,11 @@ export type HubServerFrame =
 	| { type: "publishAck"; id: string; results: { to: string; ok: boolean; error?: string }[] }
 	| { type: "pong" }
 	| { type: "bye" }
+	/** Broker-forwarded request to an answering peer (deliver-style; the
+	 *  requester's agentId rides in `msg.from`). */
+	| { type: "request"; id: string; msg: IrcMessage }
+	/** Reply routed back to the requester's connection by request id. */
+	| { type: "reply"; id: string; from: string; msg: IrcMessage }
 	| { type: "error"; message: string; code?: "unsupported-version" };
 
 /** Whether a roster row satisfies a publish target: agentId must match
