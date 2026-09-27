@@ -338,6 +338,7 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import { IrcBus } from "../irc/bus";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
@@ -1424,6 +1425,16 @@ export class AgentSession implements SettingsScope {
 			transport: cfgHubTransport.get(this.settings),
 			remoteUrl: cfgHubRemoteUrl.get(this.settings),
 			area: cfgHubArea.get(this.settings),
+		});
+		IrcBus.global().setHubRequestHandler(async (msg: IrcMessage) => {
+			const turn = await this.runEphemeralTurn({ promptText: msg.body });
+			return {
+				body: turn.replyText ?? "",
+				from: msg.to,
+				to: msg.from,
+				id: String(Date.now()),
+				ts: Date.now(),
+			};
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they
 		// are on the roster (and hear deliveries) before their first hub op.
