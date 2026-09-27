@@ -67,6 +67,20 @@ export const cfgHubArea = register({
 	},
 });
 
+/** Credential-safe form of a broker URL for logging: strips userinfo so
+ *  mqtt://user:pass@host never leaks the password into logs or telemetry. */
+export function redactHubUrl(url: string): string {
+	if (!url) return url;
+	try {
+		const parsed = new URL(url);
+		return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+	} catch {
+		// Not a parseable URL: strip anything that looks like userinfo.
+		return url.replace(/\/\/[^/@]+@/, "//");
+	}
+}
+
+
 export const cfgHubSystemScopeSocketPath = register({
 	id: "hub.systemScope.socketPath",
 	type: "string",

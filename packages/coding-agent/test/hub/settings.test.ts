@@ -34,3 +34,17 @@ describe("hub transport settings", () => {
 		});
 	});
 });
+
+import { redactHubUrl } from "@oh-my-pi/pi-coding-agent/hub/settings";
+
+describe("redactHubUrl", () => {
+	it("strips userinfo credentials", () => {
+		expect(redactHubUrl("mqtt://user:pass@pico:1883")).toBe("mqtt://pico:1883");
+	});
+	it("leaves clean URLs untouched", () => {
+		expect(redactHubUrl("mqtt://pico:1883")).toBe("mqtt://pico:1883");
+	});
+	it("handles unparseable input without leaking userinfo", () => {
+		expect(redactHubUrl("garbage//user:pass@host/path")).toBe("garbage//host/path");
+	});
+});

@@ -16,7 +16,7 @@ import { HubClient, type HubClientLike } from "./client";
 import { MqttHubClient } from "./mqtt";
 import { hubProjectNamespace } from "./broker";
 import { IrcBus } from "../bus";
-import { resolveHubArea, resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
+import { redactHubUrl, resolveHubArea, resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
 
 let current: HubClientLike | null = null;
 let starting: Promise<HubClientLike | null> | null = null;
@@ -113,7 +113,7 @@ export async function ensureHubClient(): Promise<HubClientLike | null> {
 	if (!transport.implemented) {
 		logger.warn("hub: transport not implemented; hub disabled for this session", {
 			kind: transport.kind,
-			remoteUrl: remoteUrl || "(unset)",
+			remoteUrl: remoteUrl ? redactHubUrl(remoteUrl) : "(unset)",
 		});
 		enabled = false;
 		return null;
