@@ -1427,13 +1427,19 @@ export class AgentSession implements SettingsScope {
 			area: cfgHubArea.get(this.settings),
 		});
 		IrcBus.global().setHubRequestHandler(async (msg: IrcMessage) => {
-			const turn = await this.runEphemeralTurn({ promptText: msg.body });
+			// Session-steering path: inject the request as an IRC message so the
+			// normal wake/steer machinery handles it (idle wake turn, mid-turn
+			// steer, or queued interrupt — matching hub deliverIrcMessage).
+			// The agent's reply is relayed back asynchronously as a hub publish
+			// addressed to the requester; the immediate RPC reply is the receipt.
+			const receipt = await this.deliverIrcMessage(msg);
 			return {
-				body: turn.replyText ?? "",
+				body: `[rpc-accepted: ${receipt}]`,
 				from: msg.to,
 				to: msg.from,
-				id: String(Date.now()),
+				id: `rpc-ack-${msg.id}`,
 				ts: Date.now(),
+				replyTo: msg.id,
 			};
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they
