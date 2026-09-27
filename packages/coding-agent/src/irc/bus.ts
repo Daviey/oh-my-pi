@@ -343,6 +343,29 @@ export class IrcBus {
 		return this.#takeFromMailbox(agentId, from);
 	}
 
+	/** Consume the oldest message matching `predicate`, leaving the rest of
+	 *  the mailbox intact — no take/requeue churn for correlation scans. */
+	takeMatching(agentId: string, predicate: (message: IrcMessage) => boolean): IrcMessage | undefined {
+		const mailbox = this.#mailboxes.get(agentId);
+		if (!mailbox) return undefined;
+		const index = mailbox.findIndex(predicate);
+		if (index === -1) return undefined;
+		const [message] = mailbox.splice(index, 1);
+		if (mailbox.length === 0) this.#mailboxes.delete(agentId);
+		return message;
+	}
+
+	/** Put a taken-but-unconsumed message back at the FRONT of the mailbox:
+	 *  oldest-first order is preserved for later `wait`/`take` callers. */
+	redeliver(agentId: string, message: IrcMessage): void {
+		let mailbox = this.#mailboxes.get(agentId);
+		if (!mailbox) {
+			mailbox = [];
+			this.#mailboxes.set(agentId, mailbox);
+		}
+		mailbox.unshift(message);
+	}
+
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;

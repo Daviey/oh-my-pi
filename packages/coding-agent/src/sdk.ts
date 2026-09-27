@@ -3684,6 +3684,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: cfgSkills.get(settings),
+				settings,
 				inlineToolDescriptors,
 				nativeTools,
 				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,

@@ -231,6 +231,7 @@ export class IrcBridge {
 				from: msg.from,
 				message: msg.body,
 				replyTo: msg.replyTo ?? "",
+				msgId: msg.id,
 				interrupting: streaming,
 				relayOnStop,
 			}),

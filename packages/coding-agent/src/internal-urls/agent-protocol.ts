@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { executeSend, isIrcEnabled } from "../irc/messaging";
+import { executeRequest, executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
@@ -108,16 +108,40 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const to = url.rawHost || url.hostname;
+		// agent://request/<to>?timeoutMs=N — synchronous request/reply: blocks
+		// (bounded) until the peer's reply with matching replyTo arrives or the
+		// timeout elapses. `request` is a RESERVED id: a peer literally named
+		// "request" is addressable only via scoped forms (system:request etc.).
+		const isRequest = (url.rawHost || url.hostname) === "request";
+		const to = isRequest
+			? decodeURIComponent(url.pathname.replace(/^\//, ""))
+			: (url.rawHost || url.hostname);
 		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (hasPathExtraction(url)) {
+		if (!isRequest && hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		if (isRequest) {
+			const segments = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+			if (segments.length !== 1) {
+				throw new Error("agent://request requires exactly one recipient segment: agent://request/<id>");
+			}
+		}
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
-		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
-		);
+		const timeoutMsRaw = url.searchParams?.get("timeoutMs");
+		const timeoutMs = timeoutMsRaw !== null && timeoutMsRaw !== "" ? Number(timeoutMsRaw) : undefined;
+		const result = isRequest
+			? await executeRequest(
+					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+					{
+						to,
+						message: content,
+						...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+					},
+				)
+			: await executeSend(
+					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+					{ to, message: content },
+				);
 		return {
 			content: [
 				{

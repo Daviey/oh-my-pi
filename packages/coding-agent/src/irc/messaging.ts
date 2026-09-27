@@ -49,7 +49,7 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 /** Send a direct message or broadcast; delivery never waits for a reply. */
 export async function executeSend(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string },
+	params: { to: string; message: string; messageId?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -76,12 +76,36 @@ export async function executeSend(
 	if (sameProjectPeers.length > 0) registry.setHubPeers(hubRowsToRefs(sameProjectPeers));
 
 	if (projectScoped) {
-		return sendProjectScoped({ senderId, message, scope: projectScoped, remotePeers });
+		return sendProjectScoped({
+			senderId,
+			message,
+			scope: projectScoped,
+			remotePeers,
+			messageId: params.messageId,
+		});
 	}
 
 	const systemScoped = parseSystemScope(to);
 	if (systemScoped) {
-		return sendSystemScoped({ senderId, message, agentId: systemScoped.agentId, remotePeers });
+		return sendSystemScoped({
+			senderId,
+			message,
+			agentId: systemScoped.agentId,
+			remotePeers,
+			messageId: params.messageId,
+		});
+	}
+
+	const pidScoped = parsePidScope(to);
+	if (pidScoped) {
+		return sendPidScoped({
+			senderId,
+			message,
+			pid: pidScoped.pid,
+			agentId: pidScoped.agentId,
+			remotePeers,
+			messageId: params.messageId,
+		});
 	}
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
@@ -139,6 +163,67 @@ export function parseSystemScopeForTest(to: string): { agentId: string } | null 
 	return parseSystemScope(to);
 }
 
+/** Reply-correlated request: send, then poll the sender's mailbox for a
+ *  message whose `replyTo` equals the sent id. Fail-fast roster check first
+ *  (dead peer → immediate error), deadline-bounded wait after (a busy peer's
+ *  inject surfaces at its tool boundary — the deadline must exceed its max
+ *  tool-call length). This is the synchronous half of cross-session RPC;
+ *  the reply side is an ordinary `irc send` with `replyTo` set. */
+export async function executeRequest(
+	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
+	params: { to: string; message: string; timeoutMs?: number },
+): Promise<AgentToolResult<CoordinationDetails>> {
+	const { senderId } = deps;
+	const to = params.to.trim();
+	const message = params.message;
+	if (!to) return coordinationErrorResult("A recipient is required.", { op: "request", from: senderId });
+	if (!message.trim())
+		return coordinationErrorResult("A non-empty message is required.", { op: "request", from: senderId, to });
+	if (to === senderId)
+		return coordinationErrorResult("Cannot request from yourself.", { op: "request", from: senderId, to });
+
+	// No cheap liveness check beats sending: executeSend already fail-fasts on
+	// unknown peers (roster + registry), so reuse it and let its errors
+	// short-circuit before any waiting starts. The wire id IS the correlation
+	// id: the replier answers with `replyTo: "<requestId>"` (rendered in the
+	// incoming inject).
+	const requestId = `${senderId}-req-${Date.now()}`;
+	const timeoutMs = Math.max(1_000, params.timeoutMs ?? 300_000);
+	const deadline = Date.now() + timeoutMs;
+	const sendResult = await executeSend(deps, { to, message, messageId: requestId });
+	if (sendResult.isError) {
+		return {
+			...sendResult,
+			details: { ...sendResult.details, op: "request" },
+		};
+	}
+
+	const bus = IrcBus.global();
+	while (Date.now() < deadline) {
+		// Predicate scan: non-matching mailbox entries stay put (no churn).
+		const reply = bus.takeMatching(senderId, candidate => candidate.replyTo === requestId);
+		if (reply) {
+			return {
+				content: [{ type: "text", text: formatIncoming(reply) }],
+				details: { op: "request", from: senderId, waited: reply },
+			};
+		}
+		await new Promise(resolve => setTimeout(resolve, 500));
+	}
+	return coordinationErrorResult(
+		`Request timed out after ${Math.round(timeoutMs / 1000)}s — the peer may still reply later; check wait/inbox.`,
+		{ op: "request", from: senderId, to },
+	);
+}
+
+/** `pid:<pid>:<agentId>` — machine-wide, exact-process addressing. Resolves
+ *  the same-id ambiguity when several sessions share (project, Main). */
+function parsePidScope(to: string): { pid: number; agentId: string } | null {
+	const match = /^pid:(\d+):(.+)$/.exec(to);
+	if (!match) return null;
+	return { pid: Number(match[1]), agentId: match[2]! };
+}
+
 /** System scope: `system:<agentId>` addresses every hub peer machine-wide
  *  regardless of project namespace. `global` is an alias for `system` while
  *  the hub is single-host; once extra transports land (tailnet TCP etc.),
@@ -173,6 +258,7 @@ async function sendProjectScoped(deps: {
 	message: string;
 	scope: { project: string; agentId: string };
 	remotePeers: HubRosterRow[];
+	messageId?: string;
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, scope, remotePeers } = deps;
 	const client = currentHubClient();
@@ -195,7 +281,7 @@ async function sendProjectScoped(deps: {
 		from: senderId,
 		to: scope.agentId,
 		body: message,
-		id: `${senderId}-${Date.now()}`,
+		id: deps.messageId ?? `${senderId}-${Date.now()}`,
 		ts: Date.now(),
 	};
 	const targets =
@@ -227,6 +313,7 @@ async function sendSystemScoped(deps: {
 	message: string;
 	agentId: string;
 	remotePeers: HubRosterRow[];
+	messageId?: string;
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, agentId, remotePeers } = deps;
 	const client = currentHubClient();
@@ -244,7 +331,7 @@ async function sendSystemScoped(deps: {
 		from: senderId,
 		to: agentId,
 		body: message,
-		id: `${senderId}-${Date.now()}`,
+		id: deps.messageId ?? `${senderId}-${Date.now()}`,
 		ts: Date.now(),
 	};
 	const targets = roster.map(row => ({ project: row.project, agentId: row.agentId }));
@@ -262,6 +349,42 @@ async function sendSystemScoped(deps: {
 		content: [{ type: "text", text }],
 		details: { op: "send", from: senderId, to: `system:${agentId}`, receipts: [] },
 		isError: delivered.length === 0,
+	};
+}
+
+/** Exact-process delivery: matches the roster row with this pid. */
+async function sendPidScoped(deps: {
+	senderId: string;
+	message: string;
+	pid: number;
+	agentId: string;
+	remotePeers: HubRosterRow[];
+	messageId?: string;
+}): Promise<AgentToolResult<CoordinationDetails>> {
+	const { senderId, message, pid, agentId, remotePeers } = deps;
+	const client = currentHubClient();
+	const row = remotePeers.find(candidate => candidate.agentId === agentId && candidate.pid === pid);
+	if (!client || !row) {
+		const reason = !client ? "the system-scope hub is not connected" : `no session "${agentId}" with pid ${pid}`;
+		return coordinationErrorResult(`Failed: ${reason}.`, {
+			op: "send",
+			from: senderId,
+			to: `pid:${pid}:${agentId}`,
+		});
+	}
+	const hubMessage = {
+		from: senderId,
+		to: agentId,
+		body: message,
+		id: deps.messageId ?? `${senderId}-${Date.now()}`,
+		ts: Date.now(),
+	};
+	const result = await client.publish(hubMessage, [{ project: row.project, agentId, pid }]);
+	const ok = result?.results.some(entry => entry.ok) ?? false;
+	return {
+		content: [{ type: "text", text: ok ? `Delivered to ${agentId} (pid ${pid}).` : `Failed: ${result?.results[0]?.error ?? "hub publish failed"}.` }],
+		details: { op: "send", from: senderId, to: `pid:${pid}:${agentId}`, receipts: [] },
+		isError: !ok,
 	};
 }
 

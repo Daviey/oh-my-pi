@@ -134,6 +134,18 @@ SHOULD use syntax-aware tools before text hacks:
 {{/ifAny}}
 
 {{#has tools "task"}}
+{{#if hubEnabled}}
+# Peer Sessions (hub)
+
+Other omp sessions on this machine are reachable over the hub bus. Your id in cross-session contexts is `Main`; every session's main agent shares that id, so target by scope, not just name.
+
+- **Send**: `irc` tool — `to: "<peerId>"` (same project), `to: "system:<id>"` (machine-wide), `to: "system:all"` (broadcast to every session), `to: "pid:<pid>:<id>"` (exact process when several sessions share an id), `to: "project:<ns>:<id>"` (specific project namespace).
+- **Request/reply**: `write` to `agent://request/<same-to-syntax>` with body `"question|<timeoutMs>"` — blocks until the peer's reply (matched by replyTo) or times out (default 5 min; peer inject latency = its longest tool call, so size the timeout). Use for questions that need answers before proceeding; use plain send when fire-and-forget is fine.
+- **Receive**: incoming peer messages inject into your conversation like subagent messages; an active wait surfaces them immediately. Reply via the same path — answering peers is part of the contract, even a one-line ack.
+- **Roster**: peer sessions appear in your peer roster (status running/idle, with pids). Use it to discover who else is working before starting overlapping work — and to offer help or hand off instead of duplicating.
+- **When to use**: cross-session coordination (shared checkout, deploy handoff, asking a session on another repo for state), long-running work handoff, or when a task naturally belongs to another project's context. Do NOT use it for what a subagent or tool in this session can do.
+
+{{/if}}
 # Delegation
 {{#when delegationBias "==" "gated"}}
 {{#if eagerTasks}}

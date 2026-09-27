@@ -306,10 +306,13 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 							if (record.entry.agentId === target.agentId) candidates.push(record);
 						}
 					}
-					const matches =
+					let matches =
 						target.project !== undefined
 							? candidates.filter(candidate => candidate.entry.project === target.project)
 							: candidates;
+					if (typeof target.pid === "number") {
+						matches = matches.filter(candidate => candidate.entry.pid === target.pid);
+					}
 					const conns = new Set<ClientConn>();
 					for (const candidate of matches) {
 						if (candidate.conn !== conn) {

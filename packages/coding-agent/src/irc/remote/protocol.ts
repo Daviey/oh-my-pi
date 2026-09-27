@@ -24,10 +24,12 @@ export interface HubRosterEntry {
 	sessionFile?: string;
 }
 
-/** A specific cross-project recipient: explicit namespace, or the sender's own when omitted. */
+/** A specific cross-project recipient: explicit namespace, or the sender's own when omitted.
+ *  `pid` narrows same-id registrations (several sessions share (project, Main)) to one process. */
 export interface HubTarget {
 	project?: string;
 	agentId: string;
+	pid?: number;
 }
 
 /** Client → broker frames. */
