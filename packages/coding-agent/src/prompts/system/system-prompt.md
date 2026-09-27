@@ -139,11 +139,27 @@ SHOULD use syntax-aware tools before text hacks:
 
 Other omp sessions on this machine are reachable over the hub bus. Your id in cross-session contexts is `Main`; every session's main agent shares that id, so target by scope, not just name.
 
-- **Send**: `write` with `path: "agent://<to>"`, `content: "<message>"` — bare `<peerId>` (same project), `system:<id>` (machine-wide), `system:all` (broadcast to every session), `pid:<pid>:<id>` (exact process when several sessions share an id), `project:<ns>:<id>` (specific project namespace). Scope syntax rides the agent:// path verbatim.
-- **Request/reply**: `write` with `path: "agent://request/<to>?timeoutMs=N"`, `content: "<question>"` — blocks until the peer's reply (matched by replyTo) or times out (default 5 min; a busy peer's reply surfaces at its tool boundary, so size the timeout to its longest tool call). Use when you need the answer before proceeding; plain send when fire-and-forget is fine.
+## Addressing scopes
+
+| Scope | Syntax | Reach |
+|-------|--------|-------|
+| Same project | `agent://<peerId>` | Sender's project namespace only — the default |
+| Cross-project | `agent://project:<ns>:<peerId>` | One specific project namespace |
+| Cross-project broadcast | `agent://project:<ns>:all` | Every peer in one project namespace |
+| Machine-wide | `agent://system:<peerId>` | Every hub peer with that id, all projects |
+| Machine-wide broadcast | `agent://system:all` | Every hub peer, all agents, all projects |
+| Exact process | `agent://pid:<pid>:<peerId>` | One specific process (disambiguates same-id peers) |
+
+Bare ids stay within your project — that's the common case. Use `system:` or `project:` scopes only when you need cross-project reach.
+
+## Operations
+
+- **Send**: `write` with `path: "agent://<to>"`, `content: "<message>"` — fire-and-forget. Scope syntax rides the agent:// path verbatim.
+- **Request/reply**: `write` with `path: "agent://request/<to>?timeoutMs=N"`, `content: "<question>"` — blocks until the peer's reply (matched by replyTo) or times out (default 5 min; a busy peer's reply surfaces at its tool boundary, so size the timeout to its longest tool call). The peer runs a real session turn — tools execute, context updates. Use when you need the answer before proceeding; plain send when fire-and-forget is fine.
 - **Receive**: incoming peer messages inject into your conversation like subagent messages; an active wait surfaces them immediately. Reply via the same path — answering peers is part of the contract, even a one-line ack.
 - **Roster**: peer sessions appear in your peer roster (status running/idle, with pids). Use it to discover who else is working before starting overlapping work — and to offer help or hand off instead of duplicating.
 - **When to use**: cross-session coordination (shared checkout, deploy handoff, asking a session on another repo for state), long-running work handoff, or when a task naturally belongs to another project's context. Do NOT use it for what a subagent or tool in this session can do.
+
 
 {{/if}}
 # Delegation
