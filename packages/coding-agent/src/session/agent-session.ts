@@ -1426,7 +1426,19 @@ export class AgentSession implements SettingsScope {
 			remoteUrl: cfgHubRemoteUrl.get(this.settings),
 			area: cfgHubArea.get(this.settings),
 		});
-		IrcBus.global().setHubRequestHandler(async (msg: IrcMessage) => {
+		IrcBus.global().setHubRequestHandler(async (rawMsg: IrcMessage, from: string) => {
+			// The hub frame's msg is CALLER-shaped (e.g. {type:"text", text}), not
+			// an IrcMessage — adapt body/from/to before delivery, else the agent
+			// sees an empty message with no addressable sender (observed live).
+			const requestId = rawMsg.id ?? `rpc-${Date.now()}`;
+			const msg: IrcMessage = {
+				...rawMsg,
+				body: rawMsg.body ?? (rawMsg as { text?: string }).text ?? "",
+				from: rawMsg.from ?? from,
+				to: rawMsg.to ?? this.#agentId ?? "Main",
+				id: requestId,
+				ts: rawMsg.ts ?? Date.now(),
+			};
 			// Blocking request/reply over hub RPC — mirrors executeRequest's
 			// correlated-reply wait (messaging.ts). The request is delivered as a
 			// plain IRC wake message (NO wakeRelay flag: that flag marks relay
@@ -1441,7 +1453,6 @@ export class AgentSession implements SettingsScope {
 			// Both paths feed the onSend tap below; the RPC reply frame carries
 			// the agent's actual turn output.
 			const bus = IrcBus.global();
-			const requestId = msg.id ?? `rpc-${Date.now()}`;
 			let resolveReply!: (reply: IrcMessage | null) => void;
 			const replyPromise = new Promise<IrcMessage | null>(resolve => {
 				resolveReply = resolve;
@@ -1493,7 +1504,7 @@ export class AgentSession implements SettingsScope {
 				};
 			});
 			try {
-				await this.deliverIrcMessage({ ...msg, id: requestId });
+				await this.deliverIrcMessage(msg);
 				const reply = await replyPromise;
 				if (!reply) {
 					return {
