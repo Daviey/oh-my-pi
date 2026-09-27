@@ -10,10 +10,11 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { HubClient } from "./client";
 import { hubProjectNamespace } from "./broker";
-import { resolveHubSocketPath } from "../../hub/settings";
+import { resolveHubSocketPath, resolveHubTransport, type HubTransportKind } from "../../hub/settings";
 
 let current: HubClient | null = null;
 let starting: Promise<HubClient | null> | null = null;
@@ -55,11 +56,18 @@ export interface HubRosterRow {
  * disabled write must not permanently lock the hub off); enabled→disabled
  * is refused — a later session can never silently tear the hub down mid-run.
  */
-export function configureHub(options: { enabled: boolean; socketPath: string }): void {
+export function configureHub(options: {
+	enabled: boolean;
+	socketPath: string;
+	transport?: string;
+	remoteUrl?: string;
+}): void {
 	if (armed && (enabled || !options.enabled)) return;
 	armed = true;
 	enabled = options.enabled;
 	socketPath = resolveHubSocketPath(options.socketPath, getAgentDir());
+	transport = resolveHubTransport(options.transport ?? "unix");
+	remoteUrl = options.remoteUrl?.trim() || "";
 }
 
 /**
@@ -70,6 +78,9 @@ export function configureHub(options: { enabled: boolean; socketPath: string }):
 const RETRY_DELAYS_MS = [1_000, 5_000, 30_000];
 let retryAttempt = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+/** Resolved transport (fail-closed for unimplemented kinds — see resolveHubTransport). */
+let transport: { kind: HubTransportKind; implemented: boolean } = { kind: "unix", implemented: true };
+let remoteUrl = "";
 
 function scheduleHubRetry(): void {
 	if (!enabled || current || starting) return;
@@ -89,6 +100,17 @@ function scheduleHubRetry(): void {
 export async function ensureHubClient(): Promise<HubClient | null> {
 	if (!enabled) return null;
 	if (current) return current;
+	// Fail-closed for schema-declared-but-unimplemented transports: config is
+	// accepted, connection is refused with a typed log — never a silent unix
+	// fallback that would leak cross-system intents onto a local-only bus.
+	if (!transport.implemented) {
+		logger.warn("hub: transport not implemented; hub disabled for this session", {
+			kind: transport.kind,
+			remoteUrl: remoteUrl || "(unset)",
+		});
+		enabled = false;
+		return null;
+	}
 	if (!starting) {
 		// See RETRY_DELAYS_MS below: failures back off, successes reset.
 		starting = HubClient.connect({
