@@ -41,9 +41,13 @@ export class IrcBridge {
 		this.#host = host;
 	}
 
-	/** Sidecar path next to the session journal: `<session>.irc-seen`. */
-	#seenIdsPath(): string {
-		return `${this.#host.sessionManager.getSessionFile()}.irc-seen`;
+	/** Sidecar path next to the session journal: `<session>.irc-seen`.
+	 *  Undefined when the session manager has no session file (in-memory
+	 *  sessions): dedup then lives in this bridge instance's memory only —
+	 *  never a shared `undefined.irc-seen` in the process cwd. */
+	#seenIdsPath(): string | undefined {
+		const sessionFile = this.#host.sessionManager.getSessionFile();
+		return sessionFile ? `${sessionFile}.irc-seen` : undefined;
 	}
 
 	/** Lazily load the persisted seen-id set (bounded to the last 4096 ids). */
@@ -51,13 +55,16 @@ export class IrcBridge {
 		if (this.#seenIdsLoaded) return this.#seenIds ?? new Set();
 		this.#seenIdsLoaded = true;
 		this.#seenIds = new Set();
-		try {
-			const raw = readFileSync(this.#seenIdsPath(), "utf8");
-			for (const id of raw.split("\n").slice(-4096)) {
-				if (id) this.#seenIds.add(id);
+		const seenIdsPath = this.#seenIdsPath();
+		if (seenIdsPath) {
+			try {
+				const raw = readFileSync(seenIdsPath, "utf8");
+				for (const id of raw.split("\n").slice(-4096)) {
+					if (id) this.#seenIds.add(id);
+				}
+			} catch {
+				// First delivery in this session's life: empty set is correct.
 			}
-		} catch {
-			// First delivery in this session's life: empty set is correct.
 		}
 		return this.#seenIds;
 	}
@@ -65,9 +72,11 @@ export class IrcBridge {
 	#recordSeenId(id: string): void {
 		const seen = this.#loadSeenIds();
 		seen.add(id);
+		const seenIdsPath = this.#seenIdsPath();
+		if (!seenIdsPath) return;
 		try {
 			// Append-only journal line; loader caps the set at 4096.
-			appendFileSync(this.#seenIdsPath(), `${id}\n`, { flag: "a" });
+			appendFileSync(seenIdsPath, `${id}\n`, { flag: "a" });
 		} catch {
 			// Persistence failure must not block delivery; in-memory set still
 			// dedupes within this process lifetime.
