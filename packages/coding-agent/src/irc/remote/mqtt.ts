@@ -274,7 +274,7 @@ export class MqttHubClient implements HubClientLike {
 		this.#acks.set(id, waiter);
 		this.#selfPublishes.add(id);
 		void client
-			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg, targets }), { qos: 1 })
+			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg, targets, fromProject: this.#identity?.project }), { qos: 1 })
 			.catch(() => {
 				// leave the timer to fail the request
 			});
@@ -299,7 +299,7 @@ export class MqttHubClient implements HubClientLike {
 		timer.unref?.();
 		this.#rpcWaits.set(id, { resolve, timer });
 		try {
-			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs }), { qos: 1 });
+			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs, fromProject: this.#identity?.project }), { qos: 1 });
 		} catch {
 			this.#rpcWaits.delete(id);
 			clearTimeout(timer);
@@ -453,7 +453,15 @@ export class MqttHubClient implements HubClientLike {
 		// suppressed — the unix broker likewise never delivers a publish back
 		// to the sending connection.
 		if (id && this.#selfPublishes.has(id)) return;
-		const matched = [...new Set((frame.targets ?? []).filter(target => target && hubTargetMatches(target, identity)).map(target => target.agentId))];
+		// Bare targets (no project) scope to the sender's namespace — same
+		// contract as the unix broker's conn.project resolution. A bare
+		// target from a different project does not match (cross-talk guard).
+		const resolved = (frame.targets ?? []).map(target =>
+			target && target.project === undefined && typeof frame.fromProject === "string"
+				? { ...target, project: frame.fromProject }
+				: target,
+		);
+		const matched = [...new Set(resolved.filter(target => target && hubTargetMatches(target, identity)).map(target => target.agentId))];
 		if (matched.length === 0) return;
 		this.#deliveries?.(frame.msg);
 		const client = this.#client;
@@ -474,7 +482,12 @@ export class MqttHubClient implements HubClientLike {
 		const handler = this.#requestSink;
 		if (!identity || !handler) return;
 		if (this.#selfPublishes.has(frame.id)) return; // own request echo
-		const matched = (frame.targets ?? []).some(target => target && hubTargetMatches(target, identity));
+		const resolved = (frame.targets ?? []).map(target =>
+			target && target.project === undefined && typeof frame.fromProject === "string"
+				? { ...target, project: frame.fromProject }
+				: target,
+		);
+		const matched = resolved.some(target => target && hubTargetMatches(target, identity));
 		if (!matched) return;
 		void (async () => {
 			let answer: IrcMessage | null = null;

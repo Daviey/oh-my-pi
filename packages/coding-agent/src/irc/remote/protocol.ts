@@ -70,11 +70,14 @@ export type HubClientFrame =
 	/** Activity refresh: debounced client-side (on-change, ≥5s apart). */
 	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string }
 	| { type: "roster" }
-	| { type: "publish"; msg: IrcMessage; targets: HubTarget[] }
+	/** `fromProject` scopes bare targets to the sender's namespace — the
+	 *  MQTT receive side uses it to mirror the unix broker's conn.project
+	 *  resolution (no central broker on MQTT; each peer self-addresses). */
+	| { type: "publish"; msg: IrcMessage; targets: HubTarget[]; fromProject?: string }
 	/** RPC: transmit `msg` to matching peers and await a correlated reply.
 	 *  `id` is the request correlation id (distinct from any IrcMessage id);
 	 *  answers come back as `reply` frames carrying the same id. */
-	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number }
+	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number; fromProject?: string }
 	| { type: "ping" }
 	| { type: "bye" };
 
