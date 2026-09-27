@@ -35,7 +35,7 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	return d.jobs.every(job => job?.status === "running");
 }
 /** Coordination details retained by wait and background job operations. */
-export type CoordinationOp = "send" | "wait" | "jobs" | "cancel";
+export type CoordinationOp = "send" | "wait" | "request" | "jobs" | "cancel";
 
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
 export interface JobSnapshot {
