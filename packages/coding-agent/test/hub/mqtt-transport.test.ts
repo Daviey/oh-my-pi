@@ -182,7 +182,7 @@ describe("mqtt hub transport", () => {
 		const fakeA = fakes[0]!;
 		expect(fakeA.subscribed.map(entry => entry.topic)).toContain("hub/fleet-a/frames");
 		expect(fakeA.subscribed.map(entry => entry.topic)).toContain("hub/fleet-a/presence/+");
-		expect(fakeA.published.some(entry => entry.topic === "hub/fleet-a/presence/Main" && entry.retain)).toBe(true);
+		expect(fakeA.published.some(entry => entry.topic === "hub/fleet-a/presence/Main:4242" && entry.retain)).toBe(true);
 		expect(fakeA.published.filter(entry => entry.topic === "hub/fleet-a/frames").every(entry => entry.qos === 1)).toBe(true);
 
 		const fallback = await MqttHubClient.connect({
@@ -193,7 +193,7 @@ describe("mqtt hub transport", () => {
 		expect(fallback!.area).toBe("default");
 		const fakeB = fakes[1]!;
 		expect(fakeB.subscribed.map(entry => entry.topic)).toContain("hub/default/frames");
-		expect(fakeB.published.some(entry => entry.topic === "hub/default/presence/Main")).toBe(true);
+		expect(fakeB.published.some(entry => entry.topic === "hub/default/presence/Main:4242")).toBe(true);
 
 		explicit!.close();
 		fallback!.close();
@@ -216,13 +216,13 @@ describe("mqtt hub transport", () => {
 			identity: identity(),
 		});
 		const fake = fakes[0]!;
-		const retainedRow = fake.published.find(entry => entry.topic === "hub/team/presence/Main");
+		const retainedRow = fake.published.find(entry => entry.topic === "hub/team/presence/Main:4242");
 		expect(retainedRow?.retain).toBe(true);
 		expect(JSON.parse(retainedRow!.payload).agentId).toBe("Main");
 
 		client!.close();
 		await Bun.sleep(10); // close() clears presence asynchronously
-		const cleared = fake.published.filter(entry => entry.topic === "hub/team/presence/Main").pop();
+		const cleared = fake.published.filter(entry => entry.topic === "hub/team/presence/Main:4242").pop();
 		expect(cleared!.payload).toBe("");
 		expect(cleared!.retain).toBe(true);
 		expect(fake.ended).toBe(true);
@@ -236,7 +236,7 @@ describe("mqtt hub transport", () => {
 		});
 		const fake = fakes[0]!;
 		fake.deliver(
-			hubPresenceTopic("team", "Worker"),
+			hubPresenceTopic("team", "Worker", 7),
 			JSON.stringify({ agentId: "Worker", project: "proj-b", status: "idle", pid: 7 }),
 		);
 		let roster = await client!.roster();
@@ -244,13 +244,13 @@ describe("mqtt hub transport", () => {
 
 		// Self-echo of own registration never enters the roster.
 		fake.deliver(
-			hubPresenceTopic("team", "Main"),
+			hubPresenceTopic("team", "Main", 4242),
 			JSON.stringify(identity()),
 		);
 		roster = await client!.roster();
 		expect(roster.map(entry => entry.agentId)).toEqual(["Worker"]);
 
-		fake.deliver(hubPresenceTopic("team", "Worker"), Buffer.alloc(0));
+		fake.deliver(hubPresenceTopic("team", "Worker", 7), Buffer.alloc(0));
 		roster = await client!.roster();
 		expect(roster).toEqual([]);
 		client!.close();
@@ -338,7 +338,7 @@ describe("mqtt hub transport", () => {
 		const client = await MqttHubClient.connect({ url: "mqtt://u:p@broker.local:1883", area: "team", identity: identity() });
 		const fake = fakes[0]!;
 		await client!.setStatus("idle", "waiting on tests");
-		const row = fake.published.filter(entry => entry.topic === "hub/team/presence/Main").pop();
+		const row = fake.published.filter(entry => entry.topic === "hub/team/presence/Main:4242").pop();
 		expect(row!.retain).toBe(true);
 		expect(JSON.parse(row!.payload).status).toBe("idle");
 		expect(JSON.parse(row!.payload).activity).toBe("waiting on tests");
@@ -374,7 +374,7 @@ describe("topic helpers", () => {
 		expect(hubFramesTopic("fleet")).toBe("hub/fleet/frames");
 	});
 	it("presence topic is area + agentId namespaced", () => {
-		expect(hubPresenceTopic("fleet", "Main")).toBe("hub/fleet/presence/Main");
+		expect(hubPresenceTopic("fleet", "Main", 4242)).toBe("hub/fleet/presence/Main:4242");
 	});
 });
 

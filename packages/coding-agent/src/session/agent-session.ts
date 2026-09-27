@@ -1183,10 +1183,20 @@ export class AgentSession implements SettingsScope {
 			const details = record.details && typeof record.details === "object" ? record.details : undefined;
 			if (!details) continue;
 			const from = Reflect.get(details, "from");
-			if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
-			if (Reflect.get(details, "wakeRelay") === true) continue;
+			if (typeof from !== "string" || sources.some(source => source.from === from)) continue;
+			// A same-id hub peer is not self-echo: every process's main agent
+			// is "Main", so a cross-process Main→Main request's `from` equals
+			// selfId. Keep the source when its message id belongs to an
+			// in-flight hub RPC wait this session armed (see #hubRpcRequest);
+			// without that, the wake relay never armed and the reply degraded
+			// to the 120s fallback. Genuine self-records still cannot arm it:
+			// this session never delivers a record to itself under its own id
+			// with a foreign correlation id.
 			const messageId = Reflect.get(details, "id");
-			sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
+			const messageIdString = typeof messageId === "string" ? messageId : undefined;
+			if (from === selfId && (messageIdString === undefined || !this.#hubRpcWaits.has(messageIdString))) continue;
+			if (Reflect.get(details, "wakeRelay") === true) continue;
+			sources.push({ from, messageId: messageIdString });
 		}
 		return sources;
 	}
@@ -1229,6 +1239,23 @@ export class AgentSession implements SettingsScope {
 				}
 				const bus = IrcBus.global();
 				for (const source of sources) {
+					const wait = source.messageId ? this.#hubRpcWaits.get(source.messageId) : undefined;
+					if (wait) {
+						// Hub RPC requester: resolve the handler's correlated wait
+						// directly — the reply rides the hub transport, and a local
+						// bus.send would also inject it into this same session when
+						// requester and answerer share the agent id (cross-process
+						// Main→Main).
+						wait.resolve({
+							id: Snowflake.next(),
+							from: this.#agentId ?? "Main",
+							to: source.from,
+							body,
+							ts: Date.now(),
+							replyTo: source.messageId,
+						});
+						continue;
+					}
 					await bus.send({
 						from: this.#agentId ?? "Main",
 						to: source.from,
@@ -1504,68 +1531,18 @@ export class AgentSession implements SettingsScope {
 			remoteUrl: cfgHubRemoteUrl.get(this.settings),
 			area: cfgHubArea.get(this.settings),
 		});
-		IrcBus.global().setHubRequestHandler(async (rawMsg: IrcMessage, from: string) => {
-			// The hub frame's msg is CALLER-shaped (e.g. {type:"text", text}), not
-			// an IrcMessage — adapt body/from/to before delivery, else the agent
-			// sees an empty message with no addressable sender (observed live).
-			const requestId = rawMsg.id ?? `rpc-${Date.now()}`;
-			const msg: IrcMessage = {
-				...rawMsg,
-				body: rawMsg.body ?? (rawMsg as { text?: string }).text ?? "",
-				from: rawMsg.from || from || "hub-peer",
-				to: rawMsg.to ?? this.#agentId ?? "Main",
-				id: requestId,
-				ts: rawMsg.ts ?? Date.now(),
-			};
-			// Blocking request/reply over hub RPC — mirrors executeRequest's
-			// correlated-reply wait (messaging.ts). The request is delivered as a
-			// plain IRC wake message (NO wakeRelay flag: that flag marks relay
-			// ANSWERS — wakeSources skips them, and the subagent executor relay
-			// would never fire on it), the agent runs a real session turn, and
-			// the answer comes back as a bus.send with replyTo === requestId:
-			//   - subagent targets: relayWakeTurnOutput (executor) relays
-			//     automatically from the wake source record;
-			//   - MAIN targets: no executor relay exists (the monitor is
-			//     subagent-only), so a one-shot wake observer here captures the
-			//     turn's final assistant text and sends the correlated reply.
-			// Both paths feed the onSend tap below; the RPC reply frame carries
-			// the agent's actual turn output.
-			const bus = IrcBus.global();
-			let resolveReply!: (reply: IrcMessage | null) => void;
-			const replyPromise = new Promise<IrcMessage | null>(resolve => {
-				resolveReply = resolve;
-			});
-			const timeout = setTimeout(() => resolveReply(null), 120_000);
-			const unsubscribe = bus.onSend(sent => {
-				if (sent.replyTo === requestId && sent.from === msg.to) {
-					clearTimeout(timeout);
-					resolveReply(sent);
-				}
-			});
-			// The relay itself is armed by the delivery path: deliverIrcMessage →
-			// bridge wake → #wakeForIrc arms the main-agent wake relay (or the
-			// executor's subagent relay fires for sub targets). Both send the
-			// answer with replyTo === requestId; the tap above resolves it into
-			// this RPC frame.
-			try {
-				await this.deliverIrcMessage(msg);
-				const reply = await replyPromise;
-				if (!reply) {
-					return {
-						body: "[rpc-timeout: no reply within 120s — the turn may still complete; check the session]",
-						from: msg.to,
-						to: msg.from,
-						id: `rpc-ack-${requestId}`,
-						ts: Date.now(),
-						replyTo: requestId,
-					};
-				}
-				return reply;
-			} finally {
-				unsubscribe();
-				clearTimeout(timeout);
-			}
-		});
+		// Hub RPC requests address agents by id, and this process's hub
+		// registration (hub-manager's mainIdentity) is the MAIN agent's id —
+		// only a main session may own the bus-global request handler. Binding
+		// unconditionally let every short-lived subagent ctor steal it; once
+		// that subagent was disposed, peer requests hit a dead closure whose
+		// deliverIrcMessage throws, and the transports' catch-all swallowed
+		// the throw into a silent decline (observed: a long-lived rpc process
+		// stopped answering requests entirely).
+		if ((config.agentKind ?? "main") === "main") {
+			this.#hubRpcHandler = (rawMsg: IrcMessage, from: string) => this.#hubRpcRequest(rawMsg, from);
+			IrcBus.global().setHubRequestHandler(this.#hubRpcHandler);
+		}
 		// Eager subscribe: opt-in sessions join the broker at startup so they
 		// are on the roster (and hear deliveries) before their first hub op.
 		// Fire-and-forget — never block session construction.
@@ -2339,6 +2316,94 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+	}
+
+
+	/** Bus-global hub RPC handler bound by this session's constructor (main
+	 *  sessions only — see the constructor's gating comment); null on subagents. */
+	#hubRpcHandler: ((msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null) | undefined;
+
+	/** In-flight hub RPC requests keyed by the delivered message id (the
+	 *  correlation id): the wake relay resolves these directly with the turn's
+	 *  output instead of round-tripping a self-addressed bus.send — the
+	 *  requester is remote (often a same-id "Main" in another process), so a
+	 *  local send would inject the answer into THIS session as well. */
+	#hubRpcWaits = new Map<string, { resolve: (reply: IrcMessage | null) => void }>();
+
+	/**
+	 * Answer one peer RPC request with this main session's turn output. The
+	 * hub frame's msg is CALLER-shaped (e.g. {type:"text", text}), not an
+	 * IrcMessage — adapt body/from/to before delivery, else the agent sees an
+	 * empty message with no addressable sender (observed live).
+	 *
+	 * Blocking request/reply over hub RPC — mirrors executeRequest's
+	 * correlated-reply wait (messaging.ts). The request is delivered as a
+	 * plain IRC wake message (NO wakeRelay flag: that flag marks relay
+	 * ANSWERS — wakeSources skips them, and the subagent executor relay
+	 * would never fire on it), the agent runs a real session turn, and the
+	 * answer comes back with replyTo === requestId:
+	 *   - subagent targets: relayWakeTurnOutput (executor) relays
+	 *     automatically from the wake source record;
+	 *   - MAIN targets: no executor relay exists (the monitor is
+	 *     subagent-only), so a one-shot wake observer here captures the
+	 *     turn's final assistant text and resolves the correlated wait.
+	 * Both paths resolve the wait below; the RPC reply frame carries the
+	 * agent's actual turn output.
+	 */
+	async #hubRpcRequest(rawMsg: IrcMessage, from: string): Promise<IrcMessage | null> {
+		if (this.#isDisposed) return null;
+		const requestId = rawMsg.id ?? `rpc-${Date.now()}`;
+		const text = rawMsg.body ?? ("text" in rawMsg && typeof rawMsg.text === "string" ? rawMsg.text : undefined);
+		const msg: IrcMessage = {
+			...rawMsg,
+			body: text ?? "",
+			from: rawMsg.from || from || "hub-peer",
+			to: rawMsg.to ?? this.#agentId ?? "Main",
+			id: requestId,
+			ts: rawMsg.ts ?? Date.now(),
+		};
+		const bus = IrcBus.global();
+		let resolveReply!: (reply: IrcMessage | null) => void;
+		const replyPromise = new Promise<IrcMessage | null>(resolve => {
+			resolveReply = resolve;
+		});
+		// Pre-register the correlation id so #mainWakeSources keeps the source
+		// (its `from` may equal this session's id — the cross-process same-id
+		// Main→Main case a bare name check misreads as self-echo) and the
+		// main wake relay resolves this waiter directly with the turn output.
+		this.#hubRpcWaits.set(requestId, { resolve: resolveReply });
+		const timeout = setTimeout(() => resolveReply(null), 120_000);
+		timeout.unref?.();
+		const unsubscribe = bus.onSend(sent => {
+			if (sent.replyTo === requestId && sent.from === msg.to) {
+				clearTimeout(timeout);
+				resolveReply(sent);
+			}
+		});
+		// The relay itself is armed by the delivery path: deliverIrcMessage →
+		// bridge wake → #wakeForIrc arms the main-agent wake relay (or the
+		// executor's subagent relay fires for sub targets). Both paths resolve
+		// the correlated wait above; the transport turns it into the reply
+		// frame.
+		try {
+			await this.deliverIrcMessage(msg);
+			const reply = await replyPromise;
+			if (!reply) {
+				return {
+					body: "[rpc-timeout: no reply within 120s — the turn may still complete; check the session]",
+					from: msg.to,
+					to: msg.from,
+					id: `rpc-ack-${requestId}`,
+					ts: Date.now(),
+					replyTo: requestId,
+				};
+			}
+			return reply;
+		} finally {
+			this.#hubRpcWaits.delete(requestId);
+			unsubscribe();
+			clearTimeout(timeout);
+		}
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */

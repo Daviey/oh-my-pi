@@ -300,7 +300,9 @@ export class HubClient {
 	}
 
 	/** Run the peer-request handler and send its answer back through the
-	 *  broker. A null/throwing handler declines silently (no reply frame). */
+	 *  broker. A null handler declines silently (no reply frame); a THROWING
+	 *  handler answers with an error reply so the requester fails fast
+	 *  instead of waiting out its whole RPC timeout. */
 	async #answerRequest(frame: Extract<HubServerFrame, { type: "request" }>): Promise<void> {
 		const handler = this.#requestSink;
 		if (!handler) return;
@@ -309,8 +311,15 @@ export class HubClient {
 			// Frame-level requester identity (broker-relayed) wins; fall back to
 			// any from embedded in the msg payload itself.
 			answer = (await handler(frame.msg, frame.from || frame.msg?.from || "")) ?? null;
-		} catch {
-			answer = null;
+		} catch (error) {
+			answer = {
+				id: `rpc-err-${frame.id}`,
+				from: this.#identity?.agentId ?? "",
+				to: frame.from || (frame.msg?.from ?? ""),
+				body: `[rpc-error: peer handler failed — ${error instanceof Error ? error.message : String(error)}]`,
+				ts: Date.now(),
+				replyTo: frame.id,
+			};
 		}
 		const socket = this.#socket;
 		if (!answer || !socket || this.#closed) return;

@@ -55,9 +55,13 @@ export function hubFramesTopic(area: string): string {
 	return `hub/${area}/frames`;
 }
 
-/** Presence topic for one agent under an area. */
-export function hubPresenceTopic(area: string, agentId: string): string {
-	return `hub/${area}/presence/${agentId}`;
+/** Presence topic for one agent under an area. Keyed by (agentId, pid) —
+ *  every process owns its own retained slot, so a same-id peer's exit clear
+ *  (empty payload / LWT) cannot wipe this one's roster row. The pid rides
+ *  the SAME topic segment (`<agentId>:<pid>`), keeping the single-level
+ *  `presence/+` wildcard subscription intact. */
+export function hubPresenceTopic(area: string, agentId: string, pid: number): string {
+	return `hub/${area}/presence/${agentId}:${pid}`;
 }
 
 /** How long any single client operation may take before failing open. */
@@ -198,7 +202,7 @@ export class MqttHubClient implements HubClientLike {
 
 	/** Wire the live client: subscriptions, presence, frame routing. */
 	async #start(username: string, password: string | undefined, identity: HubAgentIdentity): Promise<boolean> {
-		const presenceTopic = hubPresenceTopic(this.area, identity.agentId);
+		const presenceTopic = hubPresenceTopic(this.area, identity.agentId, identity.pid);
 		let connected: MqttConnectResult;
 		try {
 			connected = await mqttConnectFactory({
@@ -322,7 +326,7 @@ export class MqttHubClient implements HubClientLike {
 		if (activity === undefined) delete identity.activity;
 		else identity.activity = activity;
 		try {
-			await client.publishAsync(hubPresenceTopic(this.area, identity.agentId), JSON.stringify(identity), {
+			await client.publishAsync(hubPresenceTopic(this.area, identity.agentId, identity.pid), JSON.stringify(identity), {
 				qos: 1,
 				retain: true,
 			});
@@ -358,7 +362,7 @@ export class MqttHubClient implements HubClientLike {
 		if (!client || !identity) return;
 		void (async () => {
 			try {
-				await client.publishAsync(hubPresenceTopic(this.area, identity.agentId), Buffer.alloc(0), {
+				await client.publishAsync(hubPresenceTopic(this.area, identity.agentId, identity.pid), Buffer.alloc(0), {
 					qos: 1,
 					retain: true,
 				});
@@ -378,15 +382,22 @@ export class MqttHubClient implements HubClientLike {
 		if (topic.startsWith(`hub/${this.area}/presence/`)) this.#onPresence(topic, payload);
 	}
 
-	/** Merge one retained/live presence publish into the roster map. */
+	/** Merge one retained/live presence publish into the roster map. Rows are
+	 *  keyed by (agentId, pid) — several processes share one agent id (every
+	 *  process's main agent is "Main"), and each owns its own retained slot,
+	 *  so the map holds one row per process exactly like the unix broker's
+	 *  per-connection roster. The entry's own payload is authoritative; the
+	 *  topic suffix only keys the delete on empty (clear) payloads. */
 	#onPresence(topic: string, payload: Buffer): void {
-		const agentId = topic.slice(`hub/${this.area}/presence/`.length);
+		const suffix = topic.slice(`hub/${this.area}/presence/`.length);
 		const identity = this.#identity;
-		if (!agentId || !identity) return;
+		if (!suffix || !identity) return;
 		if (payload.length === 0) {
-			// Peer goodbye (clean close or LWT). Our own clear cannot arrive
-			// here: close() detaches #identity before publishing it.
-			this.#roster.delete(agentId);
+			// Peer goodbye (clean close or LWT) — clears only the dying
+			// process's own slot: the topic is (agentId, pid)-keyed, so a
+			// same-id peer's clear cannot wipe this row. Our own clear cannot
+			// arrive here: close() detaches #identity before publishing it.
+			this.#roster.delete(suffix);
 			return;
 		}
 		try {
@@ -395,7 +406,7 @@ export class MqttHubClient implements HubClientLike {
 			// Self-exclusion is (agentId, pid) exact: a same-id peer from
 			// another process stays visible, like the unix roster.
 			if (entry.agentId === identity.agentId && entry.pid === identity.pid) return;
-			this.#roster.set(entry.agentId, entry);
+			this.#roster.set(`${entry.agentId}:${entry.pid}`, entry);
 		} catch {
 			// malformed presence: ignore, keep the last known snapshot
 		}
@@ -493,8 +504,18 @@ export class MqttHubClient implements HubClientLike {
 			let answer: IrcMessage | null = null;
 			try {
 				answer = (await handler(frame.msg, frame.msg?.from ?? "")) ?? null;
-			} catch {
-				answer = null;
+			} catch (error) {
+				// A throwing handler is a distinct failure, not a decline: the
+				// requester must learn fast instead of waiting out its whole
+				// RPC timeout for a reply that will never come.
+				answer = {
+					id: `rpc-err-${frame.id}`,
+					from: identity.agentId,
+					to: frame.msg?.from ?? "",
+					body: `[rpc-error: peer handler failed — ${errorMessage(error)}]`,
+					ts: Date.now(),
+					replyTo: frame.id,
+				};
 			}
 			const client = this.#client;
 			if (!answer || !client || this.#closed) return;
