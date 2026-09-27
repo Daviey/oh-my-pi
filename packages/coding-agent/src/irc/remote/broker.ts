@@ -14,7 +14,14 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { dlopen as dlopenType, FFIType as ffiTypeType } from "bun:ffi";
-import { encodeFrame, FrameStream, type HubClientFrame, type HubRosterEntry, type HubServerFrame } from "./protocol";
+import {
+	encodeFrame,
+	FrameStream,
+	HUB_PROTOCOL_VERSION,
+	type HubClientFrame,
+	type HubRosterEntry,
+	type HubServerFrame,
+} from "./protocol";
 
 /** Socket file mode enforced after bind. */
 export const HUB_SOCKET_MODE = 0o600;
@@ -249,6 +256,17 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 	function handleFrame(conn: ClientConn, frame: Exclude<HubClientFrame, { type: "error" }>): void {
 		switch (frame.type) {
 			case "hello": {
+				// Protocol version gate: major mismatch is a typed rejection so
+				// the client can self-disable instead of misparsing frames.
+				if (typeof frame.v === "number" && frame.v !== HUB_PROTOCOL_VERSION) {
+					send(conn, {
+						type: "error",
+						message: `hub protocol version ${frame.v} unsupported (broker speaks ${HUB_PROTOCOL_VERSION})`,
+						code: "unsupported-version",
+					});
+					conn.socket.destroy();
+					break;
+				}
 				for (const entry of frame.agents) {
 					if (typeof entry?.agentId !== "string" || !entry.agentId) continue;
 					const normalized: HubRosterEntry = {
@@ -257,6 +275,10 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						status: entry.status === "idle" ? "idle" : "running",
 						pid: Number(entry.pid) || 0,
 						...(entry.sessionFile ? { sessionFile: String(entry.sessionFile) } : {}),
+						// Dumb-carrier fields: bounded on receipt so roster size is
+						// independent of what clients send.
+						...(entry.activity ? { activity: String(entry.activity).slice(0, 120) } : {}),
+						...(entry.specialism ? { specialism: String(entry.specialism).slice(0, 120) } : {}),
 					};
 					conn.agents.add(normalized.agentId);
 					const key = rosterKey(normalized.project, normalized.agentId);
@@ -271,16 +293,27 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 					}
 					records.add({ entry: normalized, conn });
 				}
-				send(conn, { type: "welcome", self: frame.agents[0]?.agentId ?? "", roster: rosterSnapshot(conn) });
+				send(conn, {
+					type: "welcome",
+					v: HUB_PROTOCOL_VERSION,
+					self: frame.agents[0]?.agentId ?? "",
+					roster: rosterSnapshot(conn),
+				});
 				break;
 			}
 			case "status": {
 				// Match on the connection's own registration: the status frame
 				// carries a bare agentId, which is unique only within the sender.
+				// The activity gist rides along (debounced by the sender); the
+				// broker overwrites on receipt — no history, no interpretation.
+				const nextActivity =
+					typeof frame.activity === "string" ? frame.activity.slice(0, 120) : undefined;
 				for (const records of rosterByAgent.values()) {
 					for (const record of records) {
 						if (record.conn === conn && record.entry.agentId === frame.agentId) {
 							record.entry.status = frame.status === "idle" ? "idle" : "running";
+							if (nextActivity === undefined) delete record.entry.activity;
+							else record.entry.activity = nextActivity;
 						}
 					}
 				}

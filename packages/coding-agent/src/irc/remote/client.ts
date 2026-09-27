@@ -14,6 +14,7 @@ import {
 	FrameStream,
 	HUB_IDLE_GRACE_ENV,
 	HUB_SOCKET_PATH_ENV,
+	HUB_PROTOCOL_VERSION,
 	type HubClientFrame,
 	type HubRosterEntry,
 	type HubServerFrame,
@@ -23,12 +24,27 @@ import {
 /** How long any single client operation may take before failing open. */
 const REQUEST_TIMEOUT_MS = 2_000;
 
+/** Client implementation version for roster metadata (best-effort). */
+const OMP_CLIENT_VERSION = (() => {
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		const pkg = require("../../package.json") as { version?: string };
+		return pkg.version ?? "unknown";
+	} catch {
+		return "unknown";
+	}
+})();
+
 export interface HubAgentIdentity {
 	agentId: string;
 	project: string;
 	status: "running" | "idle";
 	pid: number;
 	sessionFile?: string;
+	/** Current-work gist (executor-maintained, refreshed via status frames). */
+	activity?: string;
+	/** Static role tag set at registration (task name / project context). */
+	specialism?: string;
 }
 
 export interface HubClientOptions {
@@ -75,7 +91,16 @@ export class HubClient {
 		const client = new HubClient(options.socketPath, options.spawn ?? spawnHubBrokerDefault, options.idleGraceMs);
 		const connected = await client.#connectWithSpawn();
 		if (!connected) return null;
-		const welcome = await client.#request({ type: "hello", agents: [options.identity] });
+		const welcome = await client.#request({
+			type: "hello",
+			v: HUB_PROTOCOL_VERSION,
+			client: {
+				name: "omp",
+				version: OMP_CLIENT_VERSION,
+				capabilities: ["inject"],
+			},
+			agents: [options.identity],
+		});
 		if (welcome?.type !== "welcome") {
 			client.close();
 			return null;
@@ -99,11 +124,22 @@ export class HubClient {
 		return frame?.type === "publishAck" ? { results: frame.results } : null;
 	}
 
-	/** Update this process's roster status (running/idle transitions). */
-	async setStatus(status: "running" | "idle"): Promise<void> {
+	/** Update this process's roster status + current-work gist (activity is
+	 *  debounced by the caller; the broker overwrites on receipt). */
+	async setStatus(status: "running" | "idle", activity?: string): Promise<void> {
 		if (!this.#socket) return;
 		if (!this.#identity) return;
-		this.#socket.write(encodeFrame({ type: "status", agentId: this.#identity.agentId, status }) as string);
+		this.#identity.status = status;
+		if (activity === undefined) delete this.#identity.activity;
+		else this.#identity.activity = activity;
+		this.#socket.write(
+			encodeFrame({
+				type: "status",
+				agentId: this.#identity.agentId,
+				status,
+				...(activity !== undefined ? { activity } : {}),
+			}) as string,
+		);
 	}
 
 	/** Register the local sink for broker-relayed deliveries. */

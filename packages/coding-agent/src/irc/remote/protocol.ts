@@ -14,6 +14,19 @@ export const HUB_SOCKET_PATH_ENV = "OMP_HUB_SOCKET_PATH";
 /** Default ms without any connected peer before the broker daemon exits. */
 export const DEFAULT_HUB_IDLE_GRACE_MS = 30_000;
 
+/** Wire protocol version. Major mismatch → broker rejects with a typed
+ *  error frame; minors are additive and ignored by older peers. */
+export const HUB_PROTOCOL_VERSION = 1;
+
+/** Peer client identities. The broker never interprets these — carried and
+ *  echoed for consumer-side routing/claim decisions. */
+export type HubClientKind = "omp" | "hermes" | "webhook" | (string & {});
+
+/** What a peer can do with a delivered frame: "inject" = steer a live turn /
+ *  wake an idle one (interactive sessions), "poll" = drain buffered frames
+ *  on demand (webhooks, batch clients). Absent = send-only. */
+export type HubCapability = "inject" | "poll" | (string & {});
+
 /** One roster row: an agent visible to the whole user's machine. */
 export interface HubRosterEntry {
 	agentId: string;
@@ -22,6 +35,12 @@ export interface HubRosterEntry {
 	status: Extract<AgentStatus, "running" | "idle">;
 	pid: number;
 	sessionFile?: string;
+	/** Current-work gist (one bounded line, executor-maintained). Dynamic —
+	 *  refreshed via status frames; absent when idle. */
+	activity?: string;
+	/** Static role tag: spawn-time task name ("SecurityReviewer") or project
+	 *  context for main agents. Set at registration, never auto-updated. */
+	specialism?: string;
 }
 
 /** A specific cross-project recipient: explicit namespace, or the sender's own when omitted.
@@ -34,8 +53,16 @@ export interface HubTarget {
 
 /** Client → broker frames. */
 export type HubClientFrame =
-	| { type: "hello"; agents: HubRosterEntry[] }
-	| { type: "status"; agentId: string; status: "running" | "idle" }
+	| {
+			type: "hello";
+			/** Protocol major version; broker rejects mismatched majors. */
+			v: number;
+			/** Client identity: implementation name + version + capabilities. */
+			client?: { name: HubClientKind; version: string; capabilities: HubCapability[] };
+			agents: HubRosterEntry[];
+	  }
+	/** Activity refresh: debounced client-side (on-change, ≥5s apart). */
+	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string }
 	| { type: "roster" }
 	| { type: "publish"; msg: IrcMessage; targets: HubTarget[] }
 	| { type: "ping" }
@@ -43,13 +70,13 @@ export type HubClientFrame =
 
 /** Broker → client frames. */
 export type HubServerFrame =
-	| { type: "welcome"; self: string; roster: HubRosterEntry[] }
+	| { type: "welcome"; v: number; self: string; roster: HubRosterEntry[] }
 	| { type: "roster"; roster: HubRosterEntry[] }
 	| { type: "deliver"; msg: IrcMessage }
 	| { type: "publishAck"; id: string; results: { to: string; ok: boolean; error?: string }[] }
 	| { type: "pong" }
 	| { type: "bye" }
-	| { type: "error"; message: string };
+	| { type: "error"; message: string; code?: "unsupported-version" };
 
 /** Encode one frame as a newline-terminated JSON line. */
 export function encodeFrame(frame: HubClientFrame | HubServerFrame): string {

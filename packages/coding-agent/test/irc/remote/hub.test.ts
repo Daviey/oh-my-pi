@@ -15,6 +15,8 @@ function identity(agentId: string, project: string) {
 	return { agentId, project, status: "running" as const, pid: process.pid };
 }
 
+
+
 /** Raw socket client for protocol-level assertions. */
 class RawPeer {
 	#socket: net.Socket;
@@ -302,6 +304,50 @@ describe("hub broker protocol", () => {
 		setTimeout(() => resolve(), 3_000);
 		await promise;
 	}, 10_000);
+	it("rejects mismatched protocol version with a typed error", async () => {
+		const socketPath = tmpSocketPath();
+		const listening = Promise.withResolvers<void>();
+		void startHubBroker({ socketPath, idleGraceMs: 60_000, onListening: listening.resolve });
+		await listening.promise;
+		const peer = new RawPeer(socketPath);
+		await peer.connect();
+		peer.write({ type: "hello", v: 99, agents: [identity("future", "p")] });
+		const err = await peer.next();
+		expect(err.type).toBe("error");
+		expect((err as { code?: string }).code).toBe("unsupported-version");
+	}, 10_000);
+
+	it("carries activity/specialism enrichment and status-frame activity updates", async () => {
+		const socketPath = tmpSocketPath();
+		const listening = Promise.withResolvers<void>();
+		void startHubBroker({ socketPath, idleGraceMs: 60_000, onListening: listening.resolve });
+		await listening.promise;
+		const a = new RawPeer(socketPath);
+		await a.connect();
+		a.write({
+			type: "hello",
+			v: 1,
+			agents: [{ ...identity("worker", "p"), activity: "reviewing diff", specialism: "security-review" }],
+		});
+		const welcome = (await a.next()) as { type: string };
+		expect(welcome.type).toBe("welcome");
+		// Activity refresh via status frame BEFORE any other peer joins:
+		a.write({ type: "status", agentId: "worker", status: "running", activity: "running tests" });
+		// A later peer's welcome roster carries worker's row (its own rows are
+		// self-excluded from its welcome, so peer b is the observer).
+		const b = new RawPeer(socketPath);
+		await b.connect();
+		b.write({ type: "hello", v: 1, agents: [identity("other", "p2")] });
+		const welcome2 = (await b.next()) as {
+			roster: { agentId: string; activity?: string; specialism?: string }[];
+		};
+		const row = welcome2.roster.find(r => r.agentId === "worker");
+		expect(row?.specialism).toBe("security-review");
+		expect(row?.activity).toBe("running tests"); // refreshed, not the hello gist
+		a.end();
+		b.end();
+	}, 10_000);
+
 });
 
 describe("hub client", () => {

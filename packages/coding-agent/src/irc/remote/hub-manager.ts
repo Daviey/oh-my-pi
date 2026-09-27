@@ -7,9 +7,10 @@
  * behavior. Disabled or unreachable means byte-identical today behavior —
  * no socket, no daemon.
  */
+import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { HubClient } from "./client";
 import { hubProjectNamespace } from "./broker";
 import { resolveHubSocketPath } from "../../hub/settings";
@@ -97,6 +98,10 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 				project: hubProjectNamespace(process.cwd()),
 				status: "running",
 				pid: process.pid,
+				// Main agents are generalists; their project context IS their
+				// static specialism (answers "who is working on X" from the
+				// roster alone). Spawned specialists set their own via task name.
+				specialism: path.basename(path.resolve(process.cwd())) || undefined,
 			},
 		})
 			.then(async client => {
@@ -104,6 +109,7 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 					retryAttempt = 0;
 					const { IrcBus } = await import("../bus");
 					IrcBus.global().attachHubClient(client);
+					startStatusSync(client);
 					// Broker died (idle-exit/crash): drop the cached client and
 					// schedule a reconnect — a session must not silently fall
 					// off the bus after one disconnect.
@@ -127,8 +133,48 @@ export async function ensureHubClient(): Promise<HubClient | null> {
 	return starting;
 }
 
+/** Active registry→hub status mirror; replaced on reconnect, torn down on shutdown. */
+let statusSyncUnsubscribe: (() => void) | undefined;
+
+/** Minimum interval between wire status frames (per agent): activity gists
+ *  change per tool call — on-change-only with this floor keeps 20 sessions
+ *  from chattiness while staying fresh. */
+const STATUS_SYNC_MIN_INTERVAL_MS = 5_000;
+
+/** Mirror this process's main-agent registry ref into hub status frames:
+ *  run-state flips immediately, activity gist debounced (on-change, floor). */
+function startStatusSync(client: HubClient): void {
+	statusSyncUnsubscribe?.();
+	const lastSent = new Map<string, { status: string; activity?: string; at: number }>();
+	const unsub = AgentRegistry.global().onChange(event => {
+		if (event.type !== "status_changed" && event.type !== "metadata_changed") return;
+		const ref = event.ref;
+		if (ref.id !== MAIN_AGENT_ID) return;
+		const prev = lastSent.get(ref.id);
+		const now = Date.now();
+		const statusChanged = !prev || prev.status !== ref.status;
+		const activityChanged = (prev?.activity ?? undefined) !== (ref.activity ?? undefined);
+		if (!statusChanged && !activityChanged) return;
+		// Status flips go immediately (delivery routing depends on them);
+		// activity-only updates respect the debounce floor.
+		if (!statusChanged && prev && now - prev.at < STATUS_SYNC_MIN_INTERVAL_MS) return;
+		lastSent.set(ref.id, { status: ref.status, activity: ref.activity, at: now });
+		// Terminal states (aborted/parked) have no hub equivalent: the process
+		// is about to leave the roster entirely (bye/socket close).
+		if (ref.status === "running" || ref.status === "idle") {
+			void client.setStatus(ref.status, ref.activity).catch(() => {});
+		}
+	});
+	statusSyncUnsubscribe = () => {
+		unsub();
+		lastSent.clear();
+	};
+}
+
 /** Detach from the broker (test seam and shutdown). */
 export async function shutdownHubClient(): Promise<void> {
+	statusSyncUnsubscribe?.();
+	statusSyncUnsubscribe = undefined;
 	if (retryTimer) {
 		clearTimeout(retryTimer);
 		retryTimer = undefined;
