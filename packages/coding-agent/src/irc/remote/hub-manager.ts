@@ -80,7 +80,13 @@ export function configureHub(options: {
  * deadline hit while another process's broker is still binding) must not
  * stay off the bus forever. Bounded backoff; success resets the ladder.
  */
-const RETRY_DELAYS_MS = [1_000, 5_000, 30_000];
+// Backoff ladder: rapid first retries, then a steady 60s poll forever.
+// A finite ladder orphaned sessions after a broker restart — they went
+// lazy (connect-on-use only) and never re-registered on the roster until
+// their next hub op fired. With an always-on systemd broker the steady
+// poll is a cheap liveness check; without one it guarantees eventual
+// reconnect.
+const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 60_000];
 let retryAttempt = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 /** Resolved transport (fail-closed for unimplemented kinds — see resolveHubTransport). */
@@ -91,8 +97,8 @@ let area = "";
 
 function scheduleHubRetry(): void {
 	if (!enabled || current || starting) return;
-	if (retryAttempt >= RETRY_DELAYS_MS.length) return; // give up; lazy ops still work
-	const delay = RETRY_DELAYS_MS[retryAttempt++];
+	// Cap at the last rung: retry forever at 60s — never orphan.
+	const delay = RETRY_DELAYS_MS[Math.min(retryAttempt++, RETRY_DELAYS_MS.length - 1)];
 	retryTimer = setTimeout(() => {
 		retryTimer = undefined;
 		void ensureHubClient();

@@ -19,8 +19,10 @@ export const DEFAULT_HUB_IDLE_GRACE_MS = 30_000;
 export const HUB_PROTOCOL_VERSION = 1;
 
 /** Default ms a request/reply RPC waits for a correlated reply before
- *  resolving null (client request timeout and broker pending-entry TTL). */
-export const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
+ *  resolving null (client request timeout and broker pending-entry TTL).
+ *  120s matches a typical model turn; 2s timed out every real turn and
+ *  caught script callers without an explicit timeoutMs off guard. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 
 /** Peer client identities. The broker never interprets these — carried and
  *  echoed for consumer-side routing/claim decisions. */
