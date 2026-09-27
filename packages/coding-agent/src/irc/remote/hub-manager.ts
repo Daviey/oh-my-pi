@@ -14,7 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { HubClient } from "./client";
 import { hubProjectNamespace } from "./broker";
-import { resolveHubSocketPath, resolveHubTransport, type HubTransportKind } from "../../hub/settings";
+import { resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
 
 let current: HubClient | null = null;
 let starting: Promise<HubClient | null> | null = null;
@@ -79,7 +79,7 @@ const RETRY_DELAYS_MS = [1_000, 5_000, 30_000];
 let retryAttempt = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 /** Resolved transport (fail-closed for unimplemented kinds — see resolveHubTransport). */
-let transport: { kind: HubTransportKind; implemented: boolean } = { kind: "unix", implemented: true };
+let transport: { kind: string; implemented: boolean } = { kind: "unix", implemented: true };
 let remoteUrl = "";
 
 function scheduleHubRetry(): void {
@@ -226,4 +226,6 @@ export function resetHubForTests(): void {
 	armed = false;
 	enabled = false;
 	socketPath = "";
+	transport = { kind: "unix", implemented: true };
+	remoteUrl = "";
 }

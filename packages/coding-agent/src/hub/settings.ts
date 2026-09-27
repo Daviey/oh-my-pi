@@ -85,13 +85,15 @@ export function resolveHubSocketPath(configured: string, agentDir: string): stri
 /** Validate a configured transport kind; `unix` is the only implemented kind
  *  today — others are accepted in config (forward-declared schema) but the
  *  client refuses to connect and logs a typed error, fail-closed. */
-export function resolveHubTransport(kind: string): { kind: HubTransportKind; implemented: boolean } {
+export function resolveHubTransport(kind: string): { kind: string; implemented: boolean } {
 	const value = kind.trim().toLowerCase();
 	if (!HUB_TRANSPORT_KINDS.includes(value as HubTransportKind)) {
 		// Unknown configured value: fail CLOSED on the DECLARED kind (never a
 		// silent unix fallback that would leak cross-system intents locally);
 		// `implemented:false` makes ensureHubClient refuse to connect.
-		return { kind: value as HubTransportKind, implemented: false };
+		// Return kind is the normalized configured value (string, not the
+		// union) — unknown values must survive for the typed error log.
+		return { kind: value, implemented: false };
 	}
-	return { kind: value as HubTransportKind, implemented: value === "unix" };
+	return { kind: value, implemented: value === "unix" };
 }

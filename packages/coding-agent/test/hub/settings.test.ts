@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { resolveHubSocketPath, resolveHubTransport, type HubTransportKind } from "@oh-my-pi/pi-coding-agent/hub/settings";
+import { resolveHubSocketPath, resolveHubTransport } from "@oh-my-pi/pi-coding-agent/hub/settings";
 
 describe("hub transport settings", () => {
 	describe("resolveHubTransport truth table", () => {
@@ -16,7 +16,7 @@ describe("hub transport settings", () => {
 		});
 		it("unknown values fail CLOSED on the declared kind — never silent unix", () => {
 			const resolved = resolveHubTransport("carrier-pigeon");
-			expect(resolved.kind).toBe("carrier-pigeon" as HubTransportKind);
+			expect(resolved.kind).toBe("carrier-pigeon");
 			expect(resolved.implemented).toBe(false);
 		});
 		it("empty string fails closed (callers default before calling)", () => {
