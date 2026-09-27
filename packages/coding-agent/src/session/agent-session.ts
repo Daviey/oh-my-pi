@@ -1428,15 +1428,20 @@ export class AgentSession implements SettingsScope {
 		});
 		IrcBus.global().setHubRequestHandler(async (msg: IrcMessage) => {
 			// Blocking request/reply over hub RPC — mirrors executeRequest's
-			// correlated-reply wait (messaging.ts): deliver the request as a
-			// wake-relay IRC message so the agent runs a REAL session turn
-			// (context updates, tools execute, UI shows the exchange), then
-			// block until the wake-turn relay sends the answer back with
-			// replyTo === msg.id (relayWakeTurnOutput → bus.send). The RPC
-			// reply frame carries the agent's actual turn output.
+			// correlated-reply wait (messaging.ts). The request is delivered as a
+			// plain IRC wake message (NO wakeRelay flag: that flag marks relay
+			// ANSWERS — wakeSources skips them, and the subagent executor relay
+			// would never fire on it), the agent runs a real session turn, and
+			// the answer comes back as a bus.send with replyTo === requestId:
+			//   - subagent targets: relayWakeTurnOutput (executor) relays
+			//     automatically from the wake source record;
+			//   - MAIN targets: no executor relay exists (the monitor is
+			//     subagent-only), so a one-shot wake observer here captures the
+			//     turn's final assistant text and sends the correlated reply.
+			// Both paths feed the onSend tap below; the RPC reply frame carries
+			// the agent's actual turn output.
 			const bus = IrcBus.global();
 			const requestId = msg.id ?? `rpc-${Date.now()}`;
-			const requestMessage = { ...msg, id: requestId };
 			let resolveReply!: (reply: IrcMessage | null) => void;
 			const replyPromise = new Promise<IrcMessage | null>(resolve => {
 				resolveReply = resolve;
@@ -1448,8 +1453,47 @@ export class AgentSession implements SettingsScope {
 					resolveReply(sent);
 				}
 			});
+			// One-shot MAIN wake observer (single-slot: concurrent RPCs to one
+			// session serialize behind the wake queue anyway; last install wins
+			// and non-matching wakes pass through unclaimed).
+			let observerClaimed = false;
+			const clearObserver = (): void => {
+				if (observerClaimed) this.setIrcWakeTurnObserver(undefined);
+			};
+			this.setIrcWakeTurnObserver(records => {
+				const claimed = records.some(
+					record =>
+						record.role === "custom" &&
+						record.details &&
+						typeof record.details === "object" &&
+						Reflect.get(record.details, "id") === requestId,
+				);
+				if (!claimed) return undefined;
+				observerClaimed = true;
+				return async (error?: unknown) => {
+					this.setIrcWakeTurnObserver(undefined);
+					let body: string;
+					if (error !== undefined) {
+						body = `[rpc-error: wake turn failed — ${error instanceof Error ? error.message : String(error)}]`;
+					} else {
+						const last = this.getLastAssistantMessage();
+						const content = last?.content;
+						const text =
+							typeof content === "string"
+								? content
+								: Array.isArray(content)
+									? content
+											.filter(part => part.type === "text")
+											.map(part => ("text" in part && typeof part.text === "string" ? part.text : ""))
+											.join("\n")
+									: "";
+						body = text.trim() || "[rpc-done: turn produced no text output]";
+					}
+					await bus.send({ from: msg.to, to: msg.from, body, replyTo: requestId, wakeRelay: true });
+				};
+			});
 			try {
-				await this.deliverIrcMessage({ ...requestMessage, wakeRelay: true });
+				await this.deliverIrcMessage({ ...msg, id: requestId });
 				const reply = await replyPromise;
 				if (!reply) {
 					return {
@@ -1465,6 +1509,7 @@ export class AgentSession implements SettingsScope {
 			} finally {
 				unsubscribe();
 				clearTimeout(timeout);
+				clearObserver();
 			}
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they
