@@ -20,6 +20,7 @@ import {
 	FrameStream,
 	hubTargetMatches,
 	HUB_PROTOCOL_VERSION,
+	type HubTarget,
 	type HubClientFrame,
 	type HubRosterEntry,
 	type HubServerFrame,
@@ -32,6 +33,11 @@ interface ClientConn {
 	socket: net.Socket;
 	/** Agent ids this connection registered via hello/status. */
 	agents: Set<string>;
+	/** Project namespace this connection registered under (from its hello
+	 *  identity); empty when unregistered. Bare agentId targets (no explicit
+	 *  project) resolve to THIS namespace — the documented HubTarget contract:
+	 *  "explicit namespace, or the sender's own when omitted". */
+	project: string;
 }
 
 export interface HubBrokerOptions {
@@ -298,6 +304,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						...(entry.specialism ? { specialism: String(entry.specialism).slice(0, 120) } : {}),
 					};
 					conn.agents.add(normalized.agentId);
+				conn.project = normalized.project;
 					const key = rosterKey(normalized.project, normalized.agentId);
 					let records = rosterByAgent.get(key);
 					if (!records) {
@@ -350,13 +357,20 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				const targetMatches: { agentId: string; conns: Set<ClientConn>; matched: number }[] = [];
 				for (const target of frame.targets) {
 					if (typeof target?.agentId !== "string" || !target.agentId) continue;
+
+					// Documented HubTarget contract: "explicit namespace, or the
+					// sender's own when omitted" — a bare agentId resolves to the
+					// PUBLISHING connection's project, never machine-wide fan-out
+					// (cross-project noise: every project's Main got every reply).
+					const resolvedTarget: HubTarget =
+						target.project === undefined ? { ...target, project: conn.project } : target;
 					const candidates: { entry: HubRosterEntry; conn: ClientConn }[] = [];
 					for (const records of rosterByAgent.values()) {
 						for (const record of records) {
 							if (record.entry.agentId === target.agentId) candidates.push(record);
 						}
 					}
-					const matches = candidates.filter(candidate => hubTargetMatches(target, candidate.entry));
+					const matches = candidates.filter(candidate => hubTargetMatches(resolvedTarget, candidate.entry));
 					const conns = new Set<ClientConn>();
 					for (const candidate of matches) {
 						if (candidate.conn !== conn) {
@@ -401,10 +415,14 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				const targets = "targets" in frame ? frame.targets : [];
 				for (const target of targets) {
 					if (typeof target?.agentId !== "string" || !target.agentId) continue;
+					// Same contract as publish: bare agentId resolves to the
+					// requesting connection's project namespace.
+					const resolvedTarget: HubTarget =
+						target.project === undefined ? { ...target, project: conn.project } : target;
 					for (const records of rosterByAgent.values()) {
 						for (const record of records) {
 							if (record.conn === conn) continue;
-							if (record.entry.agentId === target.agentId && hubTargetMatches(target, record.entry)) {
+							if (record.entry.agentId === target.agentId && hubTargetMatches(resolvedTarget, record.entry)) {
 								deliverConns.add(record.conn);
 							}
 						}
@@ -416,9 +434,14 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 					const timer = setTimeout(() => pendingRequests.delete(frame.id), ttl + 1_000);
 					timer.unref?.();
 					pendingRequests.set(frame.id, { conn, timer });
+					// Requester identity for the target's handler: the publishing conn's
+					// first registered agentId (agents register per-conn at hello).
+					// Without it the target renders an empty sender and cannot
+					// address the reply (observed: "hub-peer is not running").
+					const fromAgentId = conn.agents.values().next().value ?? "";
 					for (const targetConn of deliverConns) {
 						try {
-							send(targetConn, { type: "request", id: frame.id, msg: frame.msg });
+							send(targetConn, { type: "request", id: frame.id, msg: frame.msg, from: fromAgentId });
 						} catch {
 							// dead peer connection: the remaining peers still answer
 						}
@@ -459,7 +482,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 			return;
 		}
 		socket.setEncoding("utf8");
-		const conn: ClientConn = { socket, agents: new Set() };
+		const conn: ClientConn = { socket, agents: new Set(), project: "" };
 		const frames = new FrameStream();
 		connections.add(conn);
 		disarmIdleTimer();

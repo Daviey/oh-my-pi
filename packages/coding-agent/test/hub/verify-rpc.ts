@@ -11,10 +11,11 @@ async function main() {
 	if (!client) { console.error("FAIL: no hub client"); process.exit(1); }
 	console.log("connected; firing RPC at Main/" + targetPid);
 	const t0 = Date.now();
+	const rosterRow = (await client.roster()).find(r => r.pid === targetPid);
 	const reply = await client.request(
-		{ type: "text", text: "Reply with exactly: HUB_RPC_OK and nothing else." } as never,
-		[{ agentId: "Main", pid: targetPid }] as never,
-		110_000,
+		{ type: "text", text: "Reply with exactly: HUB_RPC_OK3 and nothing else." } as never,
+		[{ agentId: "Main", pid: targetPid, project: rosterRow?.project }] as never,
+		150_000,
 	);
 	const dt = ((Date.now() - t0) / 1000).toFixed(1);
 	console.log(`reply after ${dt}s:`, JSON.stringify(reply, null, 2));

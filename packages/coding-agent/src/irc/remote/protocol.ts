@@ -86,7 +86,10 @@ export type HubServerFrame =
 	| { type: "bye" }
 	/** Broker-forwarded request to an answering peer (deliver-style; the
 	 *  requester's agentId rides in `msg.from`). */
-	| { type: "request"; id: string; msg: IrcMessage }
+	/** Broker→peer relay of a request frame. `from` is the requester's first
+	 *  registered agentId on its publishing connection (may be empty for raw
+	 *  script clients); the answering handler uses it to address its reply. */
+	| { type: "request"; id: string; msg: IrcMessage; from?: string }
 	/** Reply routed back to the requester's connection by request id. */
 	| { type: "reply"; id: string; from: string; msg: IrcMessage }
 	| { type: "error"; message: string; code?: "unsupported-version" };

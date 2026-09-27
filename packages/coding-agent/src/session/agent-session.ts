@@ -1173,6 +1173,74 @@ export class AgentSession implements SettingsScope {
 		return false;
 	}
 
+	/** Wake sources for the main-agent relay: custom irc records with a sender,
+	 *  mirroring the executor's wakeSources (relay answers excluded). */
+	#mainWakeSources(records: AgentMessage[]): { from: string; messageId: string | undefined }[] {
+		const selfId = this.#agentId ?? "Main";
+		const sources: { from: string; messageId: string | undefined }[] = [];
+		for (const record of records) {
+			if (record.role !== "custom") continue;
+			const details = record.details && typeof record.details === "object" ? record.details : undefined;
+			if (!details) continue;
+			const from = Reflect.get(details, "from");
+			if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
+			if (Reflect.get(details, "wakeRelay") === true) continue;
+			const messageId = Reflect.get(details, "id");
+			sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
+		}
+		return sources;
+	}
+
+	/** Install the one-shot main wake relay observer. It fires only when the
+	 *  session runs a wake whose records carry one of the armed message ids
+	 *  (parked/deferred wakes keep it armed; unrelated wakes pass through
+	 *  unmonitored), then answers every armed source with the turn's final
+	 *  assistant text via IrcBus.send (replyTo = source message id,
+	 *  wakeRelay: true) and clears the observer slot. */
+	#armMainWakeRelay(sources: { from: string; messageId: string | undefined }[]): void {
+		const armedIds = new Set(sources.map(source => source.messageId).filter(Boolean));
+		this.setIrcWakeTurnObserver(records => {
+			const mine = records.some(
+				record =>
+					record.role === "custom" &&
+					record.details &&
+					typeof record.details === "object" &&
+					armedIds.has(String(Reflect.get(record.details, "id"))),
+			);
+			if (!mine) return undefined;
+			return async (error?: unknown) => {
+				this.setIrcWakeTurnObserver(undefined);
+				let body: string;
+				if (error !== undefined) {
+					body = `[relay-error: wake turn failed — ${error instanceof Error ? error.message : String(error)}]`;
+				} else {
+					const last = this.getLastAssistantMessage();
+					const content = last?.content;
+					const text =
+						typeof content === "string"
+							? content
+							: Array.isArray(content)
+								? content
+										.filter(part => part.type === "text")
+										.map(part => ("text" in part && typeof part.text === "string" ? part.text : ""))
+										.join("\n")
+								: "";
+					body = text.trim() || "[relay-done: turn produced no text output]";
+				}
+				const bus = IrcBus.global();
+				for (const source of sources) {
+					await bus.send({
+						from: this.#agentId ?? "Main",
+						to: source.from,
+						body,
+						replyTo: source.messageId,
+						wakeRelay: true,
+					});
+				}
+			};
+		});
+	}
+
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
 	 *  route here. Wrapped in #beginInFlight/#endInFlight so the turn is tracked and its settle
 	 *  re-drains anything that stranded during it. A user interrupt may have intentionally left a
@@ -1202,6 +1270,16 @@ export class AgentSession implements SettingsScope {
 		// deferred wake runs no turn, so observing it would capture the next
 		// turn's yield/output and relay it as this wake's reply.
 		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
+		// Main-agent sessions have no executor wake relay (attachIrcWakeTurnMonitor
+		// is subagent-only), so remote requesters (agent://request peers, hub RPC
+		// frames) would wake this turn and never hear back. Arm the main wake
+		// relay: every irc source in THIS wake gets the turn's output with
+		// replyTo = its message id — the same contract as relayWakeTurnOutput.
+		// Subagent sessions keep their executor monitor (never clobber it).
+		if (this.#agentKind === "main" && this.#ircWakeTurnObserver === undefined) {
+			const sources = this.#mainWakeSources(records);
+			if (sources.length > 0) this.#armMainWakeRelay(sources);
+		}
 		this.#resetPromptMaintenanceState();
 		// Capture the generation before the wake so its post-prompt recovery wait
 		// bails the instant an abort (which bumps #promptGeneration) supersedes
@@ -1434,7 +1512,7 @@ export class AgentSession implements SettingsScope {
 			const msg: IrcMessage = {
 				...rawMsg,
 				body: rawMsg.body ?? (rawMsg as { text?: string }).text ?? "",
-				from: rawMsg.from ?? from,
+				from: rawMsg.from || from || "hub-peer",
 				to: rawMsg.to ?? this.#agentId ?? "Main",
 				id: requestId,
 				ts: rawMsg.ts ?? Date.now(),
@@ -1464,45 +1542,11 @@ export class AgentSession implements SettingsScope {
 					resolveReply(sent);
 				}
 			});
-			// One-shot MAIN wake observer (single-slot: concurrent RPCs to one
-			// session serialize behind the wake queue anyway; last install wins
-			// and non-matching wakes pass through unclaimed).
-			let observerClaimed = false;
-			const clearObserver = (): void => {
-				if (observerClaimed) this.setIrcWakeTurnObserver(undefined);
-			};
-			this.setIrcWakeTurnObserver(records => {
-				const claimed = records.some(
-					record =>
-						record.role === "custom" &&
-						record.details &&
-						typeof record.details === "object" &&
-						Reflect.get(record.details, "id") === requestId,
-				);
-				if (!claimed) return undefined;
-				observerClaimed = true;
-				return async (error?: unknown) => {
-					this.setIrcWakeTurnObserver(undefined);
-					let body: string;
-					if (error !== undefined) {
-						body = `[rpc-error: wake turn failed — ${error instanceof Error ? error.message : String(error)}]`;
-					} else {
-						const last = this.getLastAssistantMessage();
-						const content = last?.content;
-						const text =
-							typeof content === "string"
-								? content
-								: Array.isArray(content)
-									? content
-											.filter(part => part.type === "text")
-											.map(part => ("text" in part && typeof part.text === "string" ? part.text : ""))
-											.join("\n")
-									: "";
-						body = text.trim() || "[rpc-done: turn produced no text output]";
-					}
-					await bus.send({ from: msg.to, to: msg.from, body, replyTo: requestId, wakeRelay: true });
-				};
-			});
+			// The relay itself is armed by the delivery path: deliverIrcMessage →
+			// bridge wake → #wakeForIrc arms the main-agent wake relay (or the
+			// executor's subagent relay fires for sub targets). Both send the
+			// answer with replyTo === requestId; the tap above resolves it into
+			// this RPC frame.
 			try {
 				await this.deliverIrcMessage(msg);
 				const reply = await replyPromise;
@@ -1520,7 +1564,6 @@ export class AgentSession implements SettingsScope {
 			} finally {
 				unsubscribe();
 				clearTimeout(timeout);
-				clearObserver();
 			}
 		});
 		// Eager subscribe: opt-in sessions join the broker at startup so they

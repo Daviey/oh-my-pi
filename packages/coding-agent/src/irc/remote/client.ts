@@ -306,7 +306,9 @@ export class HubClient {
 		if (!handler) return;
 		let answer: IrcMessage | null = null;
 		try {
-			answer = (await handler(frame.msg, frame.msg?.from ?? "")) ?? null;
+			// Frame-level requester identity (broker-relayed) wins; fall back to
+			// any from embedded in the msg payload itself.
+			answer = (await handler(frame.msg, frame.from || frame.msg?.from || "")) ?? null;
 		} catch {
 			answer = null;
 		}
