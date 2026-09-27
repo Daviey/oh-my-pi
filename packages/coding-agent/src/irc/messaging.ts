@@ -79,6 +79,11 @@ export async function executeSend(
 		return sendProjectScoped({ senderId, message, scope: projectScoped, remotePeers });
 	}
 
+	const systemScoped = parseSystemScope(to);
+	if (systemScoped) {
+		return sendSystemScoped({ senderId, message, agentId: systemScoped.agentId, remotePeers });
+	}
+
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
 	const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 	const bus = IrcBus.global();
@@ -127,6 +132,21 @@ function parseProjectScope(to: string): { project: string; agentId: string } | n
 	const match = /^project:([^:]+):(.+)$/.exec(to);
 	if (!match) return null;
 	return { project: match[1]!, agentId: match[2]! };
+}
+
+/** Visible for tests: system/global scope syntax. */
+export function parseSystemScopeForTest(to: string): { agentId: string } | null {
+	return parseSystemScope(to);
+}
+
+/** System scope: `system:<agentId>` addresses every hub peer machine-wide
+ *  regardless of project namespace. `global` is an alias for `system` while
+ *  the hub is single-host; once extra transports land (tailnet TCP etc.),
+ *  `global` becomes cross-system and `system` stays machine-local. */
+function parseSystemScope(to: string): { agentId: string } | null {
+	const match = /^(?:system|global):(.+)$/.exec(to);
+	if (!match) return null;
+	return { agentId: match[1]! };
 }
 
 /** Broker roster rows merged into the registry's remote peer overlay. */
@@ -193,6 +213,54 @@ async function sendProjectScoped(deps: {
 	return {
 		content: [{ type: "text", text }],
 		details: { op: "send", from: senderId, to: `project:${scope.project}:${scope.agentId}`, receipts: [] },
+		isError: delivered.length === 0,
+	};
+}
+
+/**
+ * Deliver to a machine-wide recipient or broadcast (`system:<id>` /
+ * `system:all`): ignores project namespaces entirely — every hub peer
+ * matches, project included in the target rows for the broker's own filter.
+ */
+async function sendSystemScoped(deps: {
+	senderId: string;
+	message: string;
+	agentId: string;
+	remotePeers: HubRosterRow[];
+}): Promise<AgentToolResult<CoordinationDetails>> {
+	const { senderId, message, agentId, remotePeers } = deps;
+	const client = currentHubClient();
+	const isBroadcast = agentId === "all";
+	const roster = isBroadcast
+		? remotePeers.filter(row => row.agentId !== senderId)
+		: remotePeers.filter(row => row.agentId === agentId);
+	if (!client || roster.length === 0) {
+		const reason = !client
+			? "the system-scope hub is not connected"
+			: `no peer "${agentId}" machine-wide`;
+		return coordinationErrorResult(`Failed: ${reason}.`, { op: "send", from: senderId, to: `system:${agentId}` });
+	}
+	const hubMessage = {
+		from: senderId,
+		to: agentId,
+		body: message,
+		id: `${senderId}-${Date.now()}`,
+		ts: Date.now(),
+	};
+	const targets = roster.map(row => ({ project: row.project, agentId: row.agentId }));
+	const result = await client.publish(hubMessage, targets);
+	const results =
+		result?.results ?? targets.map(entry => ({ to: entry.agentId, ok: false, error: "hub publish failed" }));
+	const delivered = results.filter(entry => entry.ok);
+	const text =
+		isBroadcast
+			? `Broadcast delivered to ${delivered.length} of ${targets.length} peer(s) machine-wide.`
+			: delivered.length > 0
+				? `Delivered to ${agentId} (${targets.length} session${targets.length === 1 ? "" : "s"}).`
+				: `Failed: ${results[0]?.error ?? "hub publish failed"}.`;
+	return {
+		content: [{ type: "text", text }],
+		details: { op: "send", from: senderId, to: `system:${agentId}`, receipts: [] },
 		isError: delivered.length === 0,
 	};
 }

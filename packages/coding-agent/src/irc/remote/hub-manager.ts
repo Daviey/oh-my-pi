@@ -1,8 +1,11 @@
 /**
- * Process-scoped manager for the system-scope hub client. Lazily connects on
- * first use when `hub.systemScope.enabled` is on; every failure resolves to
- * null so callers silently fall back to in-process-only behavior. Disabled or
- * unreachable means byte-identical today behavior — no socket, no daemon.
+ * Process-scoped manager for the system-scope hub client. When
+ * `hub.systemScope.enabled` is on, sessions eager-subscribe at startup
+ * (fire-and-forget ensureHubClient) and lazy ops fall back to connect-on-use;
+ * a startup-race loser climbs a bounded retry ladder (1s/5s/30s). Every
+ * failure resolves to null so callers silently fall back to in-process-only
+ * behavior. Disabled or unreachable means byte-identical today behavior —
+ * no socket, no daemon.
  */
 import * as fs from "node:fs/promises";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
