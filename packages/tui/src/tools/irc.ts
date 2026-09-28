@@ -21,6 +21,14 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/**
+	 * High-importance delivery. Mid-turn the message routes through the
+	 * steering queue (interrupting foreground tools at the next steering
+	 * poll, ~250ms) instead of the interrupt queue, which only surfaces at
+	 * step boundaries and can starve behind one long tool call or model
+	 * response indefinitely.
+	 */
+	urgent?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */

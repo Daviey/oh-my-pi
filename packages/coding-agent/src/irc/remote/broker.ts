@@ -384,7 +384,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				let lastError: string | undefined;
 				for (const targetConn of deliverConns) {
 					try {
-						send(targetConn, { type: "deliver", msg: frame.msg });
+						send(targetConn, { type: "deliver", msg: { ...frame.msg, urgent: frame.urgent } });
 						anyOk = true;
 					} catch (error) {
 						lastError = error instanceof Error ? error.message : String(error);

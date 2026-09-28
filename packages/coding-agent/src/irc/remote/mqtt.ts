@@ -278,7 +278,7 @@ export class MqttHubClient implements HubClientLike {
 		this.#acks.set(id, waiter);
 		this.#selfPublishes.add(id);
 		void client
-			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg, targets, fromProject: this.#identity?.project }), { qos: 1 })
+			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg, targets, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 })
 			.catch(() => {
 				// leave the timer to fail the request
 			});
@@ -303,7 +303,7 @@ export class MqttHubClient implements HubClientLike {
 		timer.unref?.();
 		this.#rpcWaits.set(id, { resolve, timer });
 		try {
-			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs, fromProject: this.#identity?.project }), { qos: 1 });
+			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 });
 		} catch {
 			this.#rpcWaits.delete(id);
 			clearTimeout(timer);

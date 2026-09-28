@@ -266,6 +266,17 @@ export class IrcBridge {
 					timestamp: msg.ts,
 					steering: true,
 				});
+			} else if (msg.urgent) {
+				// Urgent non-parent: steer the FULL incoming record — it renders
+				// msgId + replyTo, so an urgent RPC's reply still correlates
+				// (parentIrcSteerTemplate drops the correlation id).
+				this.#host.agent.steer({
+					role: "user",
+					content: record.content,
+					attribution: "agent",
+					timestamp: msg.ts,
+					steering: true,
+				});
 			} else {
 				this.#interrupts.push(record);
 			}

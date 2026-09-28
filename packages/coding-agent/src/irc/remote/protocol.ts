@@ -73,11 +73,11 @@ export type HubClientFrame =
 	/** `fromProject` scopes bare targets to the sender's namespace — the
 	 *  MQTT receive side uses it to mirror the unix broker's conn.project
 	 *  resolution (no central broker on MQTT; each peer self-addresses). */
-	| { type: "publish"; msg: IrcMessage; targets: HubTarget[]; fromProject?: string }
+	| { type: "publish"; msg: IrcMessage; targets: HubTarget[]; fromProject?: string; urgent?: boolean }
 	/** RPC: transmit `msg` to matching peers and await a correlated reply.
 	 *  `id` is the request correlation id (distinct from any IrcMessage id);
 	 *  answers come back as `reply` frames carrying the same id. */
-	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number; fromProject?: string }
+	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number; fromProject?: string; urgent?: boolean }
 	| { type: "ping" }
 	| { type: "bye" };
 
@@ -94,7 +94,7 @@ export type HubServerFrame =
 	/** Broker→peer relay of a request frame. `from` is the requester's first
 	 *  registered agentId on its publishing connection (may be empty for raw
 	 *  script clients); the answering handler uses it to address its reply. */
-	| { type: "request"; id: string; msg: IrcMessage; from?: string }
+	| { type: "request"; id: string; msg: IrcMessage; from?: string; urgent?: boolean }
 	/** Reply routed back to the requester's connection by request id. */
 	| { type: "reply"; id: string; from: string; msg: IrcMessage }
 	| { type: "error"; message: string; code?: "unsupported-version" };

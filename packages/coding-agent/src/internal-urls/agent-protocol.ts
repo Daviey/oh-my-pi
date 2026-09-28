@@ -129,6 +129,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
 		const timeoutMsRaw = url.searchParams?.get("timeoutMs");
 		const timeoutMs = timeoutMsRaw !== null && timeoutMsRaw !== "" ? Number(timeoutMsRaw) : undefined;
+		const urgent = url.searchParams?.get("urgent") === "1" || url.searchParams?.get("urgent") === "true";
 		const result = isRequest
 			? await executeRequest(
 					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
@@ -136,11 +137,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 						to,
 						message: content,
 						...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+						...(urgent ? { urgent } : {}),
 					},
 				)
 			: await executeSend(
 					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-					{ to, message: content },
+					{ to, message: content, ...(urgent ? { urgent } : {}) },
 				);
 		return {
 			content: [
