@@ -11,6 +11,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { HubClientLike, HubRequestHandler } from "@oh-my-pi/pi-coding-agent/irc/remote/client";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -97,17 +98,22 @@ function attachFakeHubClient(bus: IrcBus): {
 		from: string,
 	) => Promise<IrcMessage | null> | IrcMessage | null;
 	let deliverySink!: (msg: IrcMessage) => void;
-	bus.attachHubClient({
-		onDelivery: (sink) => {
+	const fakeClient: HubClientLike = {
+		onDelivery: (sink: (msg: IrcMessage) => void) => {
 			deliverySink = sink;
 		},
-		onRequest: (sink) => {
+		onRequest: (sink: HubRequestHandler) => {
 			requestSink = sink;
 		},
+		// Unused by the lifecycle paths under test:
+		roster: () => Promise.reject(new Error("not implemented")),
+		request: () => Promise.resolve(null),
+		setStatus: () => Promise.resolve(),
 		onClose: () => {},
 		publish: async () => ({ results: [] }),
 		close: () => {},
-	} as never);
+	};
+	bus.attachHubClient(fakeClient);
 	return {
 		requestSink: (msg, from) => requestSink(msg, from),
 		deliverySink: (msg) => deliverySink(msg),
