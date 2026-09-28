@@ -142,7 +142,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 						message: content,
 						...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
 						...(urgent ? { urgent } : {}),
-						...(replyTo ? { replyTo } : {}),
 					},
 				)
 			: await executeSend(

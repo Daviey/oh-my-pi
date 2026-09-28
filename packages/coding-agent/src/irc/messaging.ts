@@ -177,7 +177,7 @@ export function parseSystemScopeForTest(to: string): { agentId: string } | null 
  *  the reply side is an ordinary `irc send` with `replyTo` set. */
 export async function executeRequest(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string; timeoutMs?: number; urgent?: boolean; replyTo?: string },
+	params: { to: string; message: string; timeoutMs?: number; urgent?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId } = deps;
 	const to = params.to.trim();
@@ -196,25 +196,26 @@ export async function executeRequest(
 	const requestId = `${senderId}-req-${Date.now()}`;
 	const timeoutMs = Math.max(1_000, params.timeoutMs ?? 300_000);
 	const deadline = Date.now() + timeoutMs;
-	const sendResult = await executeSend(deps, { to, message, messageId: requestId, urgent: params.urgent, replyTo: params.replyTo });
-	if (sendResult.isError) {
-		return {
-			...sendResult,
-			details: { ...sendResult.details, op: "request" },
-		};
-	}
-
 	const bus = IrcBus.global();
-	// A successful reply is consumed by the peer's session (steer/wake
-	// injection) and never buffers to the mailbox — without this observer the
-	// wait below can only ever see FAILED deliveries. The predicate mirrors
-	// takeMatching's; first match wins and unregisters.
+	// Subscribe BEFORE the send: a fast reply (~300ms steer latency) can land
+	// while executeSend still awaits publish acks (up to 2s). A successful
+	// reply is consumed by the peer's session (steer/wake injection) and never
+	// buffers to the mailbox — without this observer the wait below can only
+	// ever see FAILED deliveries. The predicate mirrors takeMatching's; first
+	// match wins and unregisters.
 	let deliveredReply: IrcMessage | undefined;
 	const unsubscribe = bus.onDeliver(candidate => {
 		if (deliveredReply) return;
 		if (candidate.replyTo === requestId) deliveredReply = candidate;
 	});
 	try {
+		const sendResult = await executeSend(deps, { to, message, messageId: requestId, urgent: params.urgent });
+		if (sendResult.isError) {
+			return {
+				...sendResult,
+				details: { ...sendResult.details, op: "request" },
+			};
+		}
 		while (Date.now() < deadline) {
 			if (deliveredReply) {
 				return {
