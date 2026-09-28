@@ -41,6 +41,10 @@ export interface HubRosterEntry {
 	status: Extract<AgentStatus, "running" | "idle">;
 	pid: number;
 	sessionFile?: string;
+	/** Leaf id of the registered session (basename suffix of sessionFile).
+	 *  Lets senders address a specific RUN of an agent id — stable across
+	 *  process restarts, unlike pid. Absent on legacy peers. */
+	sessionId?: string;
 	/** Current-work gist (one bounded line, executor-maintained). Dynamic —
 	 *  refreshed via status frames; absent when idle. */
 	activity?: string;
@@ -48,14 +52,16 @@ export interface HubRosterEntry {
 	 *  context for main agents. Set at registration, never auto-updated. */
 	specialism?: string;
 }
-
 /** A specific cross-project recipient: explicit namespace, or the sender's own when omitted.
- *  `pid` narrows same-id registrations (several sessions share (project, Main)) to one process. */
+ *  `pid` narrows same-id registrations (several sessions share (project, Main)) to one process.
+ *  `sessionId` anchors to a specific run of that agent id (stable across restarts). */
 export interface HubTarget {
 	project?: string;
 	agentId: string;
 	pid?: number;
+	sessionId?: string;
 }
+
 
 /** Client → broker frames. */
 export type HubClientFrame =
@@ -63,12 +69,11 @@ export type HubClientFrame =
 			type: "hello";
 			/** Protocol major version; broker rejects mismatched majors. */
 			v: number;
-			/** Client identity: implementation name + version + capabilities. */
 			client?: { name: HubClientKind; version: string; capabilities: HubCapability[] };
 			agents: HubRosterEntry[];
 	  }
 	/** Activity refresh: debounced client-side (on-change, ≥5s apart). */
-	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string }
+	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string; sessionId?: string }
 	| { type: "roster" }
 	/** `fromProject` scopes bare targets to the sender's namespace — the
 	 *  MQTT receive side uses it to mirror the unix broker's conn.project
@@ -103,10 +108,11 @@ export type HubServerFrame =
  *  exactly; `project` (when set) narrows to that namespace and `pid` (when
  *  set) narrows same-id registrations to one process. Shared by the unix
  *  broker's fan-out and the mqtt client's receive-side self-addressing. */
-export function hubTargetMatches(target: HubTarget, entry: { agentId: string; project: string; pid: number }): boolean {
+export function hubTargetMatches(target: HubTarget, entry: { agentId: string; project: string; pid: number; sessionId?: string }): boolean {
 	if (target.agentId !== entry.agentId) return false;
 	if (target.project !== undefined && target.project !== entry.project) return false;
 	if (typeof target.pid === "number" && entry.pid !== target.pid) return false;
+	if (target.sessionId !== undefined && entry.sessionId !== target.sessionId) return false;
 	return true;
 }
 

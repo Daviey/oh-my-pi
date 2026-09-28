@@ -298,6 +298,7 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 						status: entry.status === "idle" ? "idle" : "running",
 						pid: Number(entry.pid) || 0,
 						...(entry.sessionFile ? { sessionFile: String(entry.sessionFile) } : {}),
+						...(entry.sessionId ? { sessionId: String(entry.sessionId) } : {}),
 						// Dumb-carrier fields: bounded on receipt so roster size is
 						// independent of what clients send.
 						...(entry.activity ? { activity: String(entry.activity).slice(0, 120) } : {}),
@@ -332,12 +333,15 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				// broker overwrites on receipt — no history, no interpretation.
 				const nextActivity =
 					typeof frame.activity === "string" ? frame.activity.slice(0, 120) : undefined;
+				const nextSessionId = typeof frame.sessionId === "string" ? frame.sessionId : undefined;
 				for (const records of rosterByAgent.values()) {
 					for (const record of records) {
 						if (record.conn === conn && record.entry.agentId === frame.agentId) {
 							record.entry.status = frame.status === "idle" ? "idle" : "running";
 							if (nextActivity === undefined) delete record.entry.activity;
 							else record.entry.activity = nextActivity;
+							if (nextSessionId === undefined) delete record.entry.sessionId;
+							else record.entry.sessionId = nextSessionId;
 						}
 					}
 				}

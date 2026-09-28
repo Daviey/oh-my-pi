@@ -114,6 +114,20 @@ export async function executeSend(
 		});
 	}
 
+	const sessionScoped = parseSessionScope(to);
+	if (sessionScoped) {
+		return sendSessionScoped({
+			senderId,
+			message,
+			sessionId: sessionScoped.sessionId,
+			agentId: sessionScoped.agentId,
+			remotePeers,
+			messageId: params.messageId,
+			urgent: params.urgent,
+			replyTo: params.replyTo,
+		});
+	}
+
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
 	const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 	const bus = IrcBus.global();
@@ -261,6 +275,14 @@ function parseSystemScope(to: string): { agentId: string } | null {
 	const match = /^(?:system|global):(.+)$/.exec(to);
 	if (!match) return null;
 	return { agentId: match[1]! };
+}
+/** `session:<sessionId>` — machine-wide, exact-session addressing. Resolves
+ *  the same-id ambiguity when several sessions share (project, Main) without
+ *  needing a pid (which changes on restart). Stable across restarts. */
+function parseSessionScope(to: string): { sessionId: string; agentId: string } | null {
+	const match = /^session:(.+)$/.exec(to);
+	if (!match) return null;
+	return { sessionId: match[1]!, agentId: MAIN_AGENT_ID };
 }
 
 /** Broker roster rows merged into the registry's remote peer overlay. */
@@ -426,6 +448,45 @@ async function sendPidScoped(deps: {
 		content: [{ type: "text", text: ok ? `Delivered to ${agentId} (pid ${pid}).` : `Failed: ${result?.results[0]?.error ?? "hub publish failed"}.` }],
 		details: { op: "send", from: senderId, to: `pid:${pid}:${agentId}`, receipts: [] },
 		isError: !ok,
+	};
+}
+/** Exact-session delivery: matches the roster row with this sessionId. */
+async function sendSessionScoped(deps: {
+	senderId: string;
+	message: string;
+	sessionId: string;
+	agentId: string;
+	remotePeers: HubRosterRow[];
+	messageId?: string;
+	replyTo?: string;
+	urgent?: boolean;
+}): Promise<AgentToolResult<CoordinationDetails>> {
+	const { senderId, message, sessionId, agentId, remotePeers } = deps;
+	const client = currentHubClient();
+	const row = remotePeers.find(candidate => candidate.sessionId === sessionId && candidate.agentId === agentId);
+	if (!client || !row) {
+		const reason = !client ? "the system-scope hub is not connected" : `no session "${agentId}" with sessionId ${sessionId}`;
+		return coordinationErrorResult(`Failed: ${reason}.`, {
+			op: "send",
+			from: senderId,
+			to: `session:${sessionId}`,
+		});
+	}
+	const hubMessage = {
+		from: senderId,
+		to: agentId,
+		body: message,
+		id: deps.messageId ?? `${senderId}-${Date.now()}`,
+		ts: Date.now(),
+		...(deps.replyTo ? { replyTo: deps.replyTo } : {}),
+	};
+	const result = await client.publish(hubMessage, [{ project: row.project, agentId, sessionId }]);
+	const results = result?.results ?? [{ to: agentId, ok: false, error: "hub publish failed" }];
+	const delivered = results.filter(entry => entry.ok);
+	return {
+		content: [{ type: "text", text: delivered.length > 0 ? `Delivered to session ${sessionId}.` : `Failed: ${results[0]?.error ?? "hub publish failed"}.` }],
+		details: { op: "send", from: senderId, to: `session:${sessionId}`, receipts: [] },
+		isError: delivered.length === 0,
 	};
 }
 

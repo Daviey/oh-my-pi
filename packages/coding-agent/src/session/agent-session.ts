@@ -125,7 +125,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { cfgHubArea, cfgHubRemoteUrl, cfgHubSystemScopeEnabled, cfgHubSystemScopeSocketPath, cfgHubTransport } from "../hub/settings";
-import { configureHub, ensureHubClient } from "../irc/remote/hub-manager";
+import { configureHub, ensureHubClient, setMainIdentityOverrides } from "../irc/remote/hub-manager";
 import type { Settings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
@@ -1547,6 +1547,9 @@ export class AgentSession implements SettingsScope {
 		// are on the roster (and hear deliveries) before their first hub op.
 		// Fire-and-forget — never block session construction.
 		if (cfgHubSystemScopeEnabled.get(this.settings)) {
+			// sessionId on the roster row: stable across restarts, unlike pid,
+			// so cross-host senders can address this exact run (`session:` scope).
+			setMainIdentityOverrides({ sessionId: this.sessionManager.getSessionId() });
 			void ensureHubClient().catch(() => {});
 		}
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();

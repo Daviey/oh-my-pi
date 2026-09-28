@@ -49,6 +49,7 @@ export interface HubRosterRow {
 	status: "running" | "idle";
 	pid: number;
 	sessionFile?: string;
+	sessionId?: string;
 	remote: true;
 }
 
@@ -174,7 +175,18 @@ function mainIdentity() {
 		// static specialism (answers "who is working on X" from the
 		// roster alone). Spawned specialists set their own via task name.
 		specialism: path.basename(path.resolve(process.cwd())) || undefined,
+		sessionId: mainSessionIdOverride,
 	};
+}
+/** Caller-supplied overrides for the next registration cycle.
+ *  `sessionId` is set once at eager-connect time so the session id
+ *  is visible on the roster from the first publish; leave unset when
+ *  the process does not yet know its session. */
+let mainSessionIdOverride: string | undefined;
+
+/** Override the default identity for the next connect cycle. */
+export function setMainIdentityOverrides(options: { sessionId?: string }): void {
+	mainSessionIdOverride = options.sessionId;
 }
 
 /** Post-connect wiring shared by every transport: bus attachment, status

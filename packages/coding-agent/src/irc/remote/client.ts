@@ -43,6 +43,8 @@ export interface HubAgentIdentity {
 	status: "running" | "idle";
 	pid: number;
 	sessionFile?: string;
+	/** Leaf id of the registered session (stable across restarts, unlike pid). */
+	sessionId?: string;
 	/** Current-work gist (executor-maintained, refreshed via status frames). */
 	activity?: string;
 	/** Static role tag set at registration (task name / project context). */
