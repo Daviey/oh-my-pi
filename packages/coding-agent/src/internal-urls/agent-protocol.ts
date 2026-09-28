@@ -130,6 +130,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const timeoutMsRaw = url.searchParams?.get("timeoutMs");
 		const timeoutMs = timeoutMsRaw !== null && timeoutMsRaw !== "" ? Number(timeoutMsRaw) : undefined;
 		const urgent = url.searchParams?.get("urgent") === "1" || url.searchParams?.get("urgent") === "true";
+		// ?replyTo=<msgId> correlates a reply with an in-flight request (the
+		// requester's takeMatching scans for this exact field on the reply).
+		const replyToRaw = url.searchParams?.get("replyTo");
+		const replyTo = replyToRaw !== null && replyToRaw !== "" ? decodeURIComponent(replyToRaw) : undefined;
 		const result = isRequest
 			? await executeRequest(
 					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
@@ -138,11 +142,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 						message: content,
 						...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
 						...(urgent ? { urgent } : {}),
+						...(replyTo ? { replyTo } : {}),
 					},
 				)
 			: await executeSend(
 					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-					{ to, message: content, ...(urgent ? { urgent } : {}) },
+					{ to, message: content, ...(urgent ? { urgent } : {}), ...(replyTo ? { replyTo } : {}) },
 				);
 		return {
 			content: [

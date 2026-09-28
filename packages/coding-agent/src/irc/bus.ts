@@ -47,6 +47,11 @@ export class IrcBus {
 	/** Send observers: fire-and-forget taps on every outgoing message (used by
 	 *  the hub RPC handler to capture the wake-turn relay reply). */
 	#sendListeners: ((message: IrcMessage) => void)[] = [];
+	/** Deliver observers: fire-and-forget taps on every incoming message that
+	 *  reaches a live consumer (waiter/injection/revival). Lets correlated
+	 *  requesters observe replies that bypass the mailbox — a successful
+	 *  delivery is consumed by the recipient and never buffered. */
+	#deliverListeners: ((message: IrcMessage) => void)[] = [];
 
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
@@ -138,6 +143,21 @@ export class IrcBus {
 		return () => {
 			const index = this.#sendListeners.indexOf(listener);
 			if (index !== -1) this.#sendListeners.splice(index, 1);
+		};
+	}
+
+	/** Observe every incoming delivery that reaches a live consumer —
+	 *  waiter-resolved, injected into a session, or park-revived (not failed
+	 *  sends, which buffer to the mailbox instead). Correlated requesters use
+	 *  this to catch replies the recipient's turn consumes directly: without
+	 *  it, a successful same-process reply never resolves a `takeMatching`
+	 *  wait, because consumption bypasses the mailbox. Fire-and-forget;
+	 *  listener errors are swallowed. Returns an unsubscribe function. */
+	onDeliver(listener: (message: IrcMessage) => void): () => void {
+		this.#deliverListeners.push(listener);
+		return () => {
+			const index = this.#deliverListeners.indexOf(listener);
+			if (index !== -1) this.#deliverListeners.splice(index, 1);
 		};
 	}
 
@@ -237,6 +257,7 @@ export class IrcBus {
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
+			this.#notifyDeliver(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
@@ -248,6 +269,7 @@ export class IrcBus {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message);
+			this.#notifyDeliver(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
@@ -401,6 +423,18 @@ export class IrcBus {
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
+	}
+
+	/** Fan out to deliver listeners (mirrors the send-listener loop; a
+	 *  throwing observer never blocks delivery). */
+	#notifyDeliver(message: IrcMessage): void {
+		for (const listener of [...this.#deliverListeners]) {
+			try {
+				listener(message);
+			} catch {
+				// Observer failures never block the deliver path.
+			}
+		}
 	}
 
 	#enqueue(message: IrcMessage): void {

@@ -49,7 +49,7 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 /** Send a direct message or broadcast; delivery never waits for a reply. */
 export async function executeSend(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string; messageId?: string; urgent?: boolean },
+	params: { to: string; message: string; messageId?: string; urgent?: boolean; replyTo?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -83,6 +83,7 @@ export async function executeSend(
 			remotePeers,
 			messageId: params.messageId,
 			urgent: params.urgent,
+			replyTo: params.replyTo,
 		});
 	}
 
@@ -95,6 +96,7 @@ export async function executeSend(
 			remotePeers,
 			messageId: params.messageId,
 			urgent: params.urgent,
+			replyTo: params.replyTo,
 		});
 	}
 
@@ -108,6 +110,7 @@ export async function executeSend(
 			remotePeers,
 			urgent: params.urgent,
 			messageId: params.messageId,
+			replyTo: params.replyTo,
 		});
 	}
 
@@ -115,7 +118,7 @@ export async function executeSend(
 	const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
 	const bus = IrcBus.global();
 	const receipts = await Promise.all(
-		targets.map(target => bus.send({ from: senderId, to: target, body: message, urgent: params.urgent }, { suppressRelay })),
+		targets.map(target => bus.send({ from: senderId, to: target, body: message, urgent: params.urgent, replyTo: params.replyTo }, { suppressRelay })),
 	);
 	const delivered = receipts.filter(receipt => receipt.outcome !== "failed");
 	let text: string;
@@ -174,7 +177,7 @@ export function parseSystemScopeForTest(to: string): { agentId: string } | null 
  *  the reply side is an ordinary `irc send` with `replyTo` set. */
 export async function executeRequest(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string; timeoutMs?: number; urgent?: boolean },
+	params: { to: string; message: string; timeoutMs?: number; urgent?: boolean; replyTo?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId } = deps;
 	const to = params.to.trim();
@@ -193,7 +196,7 @@ export async function executeRequest(
 	const requestId = `${senderId}-req-${Date.now()}`;
 	const timeoutMs = Math.max(1_000, params.timeoutMs ?? 300_000);
 	const deadline = Date.now() + timeoutMs;
-	const sendResult = await executeSend(deps, { to, message, messageId: requestId, urgent: params.urgent });
+	const sendResult = await executeSend(deps, { to, message, messageId: requestId, urgent: params.urgent, replyTo: params.replyTo });
 	if (sendResult.isError) {
 		return {
 			...sendResult,
@@ -202,16 +205,38 @@ export async function executeRequest(
 	}
 
 	const bus = IrcBus.global();
-	while (Date.now() < deadline) {
-		// Predicate scan: non-matching mailbox entries stay put (no churn).
-		const reply = bus.takeMatching(senderId, candidate => candidate.replyTo === requestId);
-		if (reply) {
-			return {
-				content: [{ type: "text", text: formatIncoming(reply) }],
-				details: { op: "request", from: senderId, waited: reply },
-			};
+	// A successful reply is consumed by the peer's session (steer/wake
+	// injection) and never buffers to the mailbox — without this observer the
+	// wait below can only ever see FAILED deliveries. The predicate mirrors
+	// takeMatching's; first match wins and unregisters.
+	let deliveredReply: IrcMessage | undefined;
+	const unsubscribe = bus.onDeliver(candidate => {
+		if (deliveredReply) return;
+		if (candidate.replyTo === requestId) deliveredReply = candidate;
+	});
+	try {
+		while (Date.now() < deadline) {
+			if (deliveredReply) {
+				return {
+					content: [{ type: "text", text: formatIncoming(deliveredReply) }],
+					details: { op: "request", from: senderId, waited: deliveredReply },
+				};
+			}
+			// Mailbox scan covers FAILED-delivery buffers (peer disposed
+			// mid-shutdown, buffered for later drain).
+			const reply = bus.takeMatching(senderId, candidate => candidate.replyTo === requestId);
+			if (reply) {
+				return {
+					content: [{ type: "text", text: formatIncoming(reply) }],
+					details: { op: "request", from: senderId, waited: reply },
+				};
+			}
+			const { promise: tick, resolve } = Promise.withResolvers<void>();
+			setTimeout(resolve, 100);
+			await tick;
 		}
-		await new Promise(resolve => setTimeout(resolve, 500));
+	} finally {
+		unsubscribe();
 	}
 	return coordinationErrorResult(
 		`Request timed out after ${Math.round(timeoutMs / 1000)}s — the peer may still reply later; check wait/inbox.`,
@@ -263,6 +288,7 @@ async function sendProjectScoped(deps: {
 	urgent?: boolean;
 	remotePeers: HubRosterRow[];
 	messageId?: string;
+	replyTo?: string;
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, scope, remotePeers } = deps;
 	const client = currentHubClient();
@@ -288,6 +314,7 @@ async function sendProjectScoped(deps: {
 		id: deps.messageId ?? `${senderId}-${Date.now()}`,
 		ts: Date.now(),
 		...(deps.urgent ? { urgent: deps.urgent } : {}),
+		...(deps.replyTo ? { replyTo: deps.replyTo } : {}),
 	};
 	const targets =
 		scope.agentId === "all" ? roster.map(row => ({ project: row.project, agentId: row.agentId })) : [target];
@@ -319,6 +346,7 @@ async function sendSystemScoped(deps: {
 	agentId: string;
 	remotePeers: HubRosterRow[];
 	messageId?: string;
+	replyTo?: string;
 	urgent?: boolean;
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, agentId, remotePeers } = deps;
@@ -340,6 +368,7 @@ async function sendSystemScoped(deps: {
 		id: deps.messageId ?? `${senderId}-${Date.now()}`,
 		ts: Date.now(),
 		...(deps.urgent ? { urgent: deps.urgent } : {}),
+		...(deps.replyTo ? { replyTo: deps.replyTo } : {}),
 	};
 	const targets = roster.map(row => ({ project: row.project, agentId: row.agentId }));
 	const result = await client.publish(hubMessage, targets);
@@ -367,6 +396,7 @@ async function sendPidScoped(deps: {
 	agentId: string;
 	remotePeers: HubRosterRow[];
 	messageId?: string;
+	replyTo?: string;
 	urgent?: boolean;
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, pid, agentId, remotePeers } = deps;
@@ -387,6 +417,7 @@ async function sendPidScoped(deps: {
 		id: deps.messageId ?? `${senderId}-${Date.now()}`,
 		ts: Date.now(),
 		...(deps.urgent ? { urgent: deps.urgent } : {}),
+		...(deps.replyTo ? { replyTo: deps.replyTo } : {}),
 	};
 	const result = await client.publish(hubMessage, [{ project: row.project, agentId, pid }]);
 	const ok = result?.results.some(entry => entry.ok) ?? false;
