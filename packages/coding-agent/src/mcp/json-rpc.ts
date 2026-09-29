@@ -195,10 +195,35 @@ export async function callMCP(
 		throw new Error(errorMsg);
 	}
 
+	// Tap the body as it streams: response.clone() deadlocks on a live SSE
+	// stream (tee holds the source open until BOTH branches read), and
+	// clone-after-consume throws ERR_BODY_ALREADY_USED. A TransformStream
+	// copies each chunk as it passes, so the parse-failure catch can log the
+	// received bytes without ever blocking the SSE reader.
+	const bodyChunks: Uint8Array[] = [];
+	const tapped = response.body!.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				bodyChunks.push(chunk);
+				controller.enqueue(chunk);
+			},
+		}),
+	);
+	const tappedResponse = new Response(tapped, response);
+	const tappedText = async (): Promise<string> => {
+		const total = bodyChunks.reduce((n, c) => n + c.length, 0);
+		const out = new Uint8Array(total);
+		let offset = 0;
+		for (const chunk of bodyChunks) {
+			out.set(chunk, offset);
+			offset += chunk.length;
+		}
+		return new TextDecoder().decode(out);
+	};
 	try {
-		return await readMcpJsonRpcResponse(response, body.id, signal);
+		return await readMcpJsonRpcResponse(tappedResponse, body.id, signal);
 	} catch (error) {
-		const text = await response.text().catch(() => "");
+		const text = await tappedText().catch(() => "");
 		logger.error("Failed to parse MCP response", {
 			url: redactUrlForLog(url),
 			method,
