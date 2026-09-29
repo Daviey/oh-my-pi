@@ -81,3 +81,18 @@ describe("resolveProjectNs alias resolution", () => {
 		expect(diagnoseProjectNsForTest(roster, "zzzz")).toBeNull();
 	});
 });
+
+describe("resolveProjectNs identical-specialism ambiguity", () => {
+	it("two same-basename checkouts (both specialism 'autoreview') are ambiguous", () => {
+		// The actual same-basename scenario: dev/autoreview + tmp/autoreview
+		// register the SAME specialism with distinct hashes. No exact single
+		// winner exists — resolution must refuse, and the diagnosis must list
+		// both hashes so the caller can pick.
+		const dupes = [
+			{ project: "cccc3333cccc3333", specialism: "autoreview" },
+			{ project: "dddd4444dddd4444", specialism: "autoreview" },
+		];
+		expect(resolveProjectNsForTest(dupes, "autoreview")).toEqual([]);
+		expect(diagnoseProjectNsForTest(dupes, "autoreview")).toEqual(["cccc3333cccc3333", "dddd4444dddd4444"]);
+	});
+});
