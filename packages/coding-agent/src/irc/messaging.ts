@@ -308,19 +308,17 @@ function resolveProjectNs(
 	token: string,
 ): string[] {
 	if (remotePeers.some(row => row.project === token)) return [token];
-	// Specialism family: exact name OR names it prefixes ("autoreview" vs
-	// "autoreview-two" collide — two same-basename checkouts disambiguated
-	// by suffix). Any family of >1 is ambiguous, never a guess.
-	const specialismFamily = [
-		...new Set(
-			remotePeers
-				.filter(row => row.specialism !== undefined && (row.specialism === token || row.specialism.startsWith(token)))
-				.map(row => row.project),
-		),
-	];
-	if (specialismFamily.length === 1) return specialismFamily;
+	// Specialism: EXACT name wins outright (one unique basename → its
+	// project), even when another specialism merely startsWith it
+	// ("autoreview" vs "autoreview-two" — suffix disambiguation, not
+	// collision). Only when no exact hit exists do we fall through to the
+	// hash-prefix family check, where >1 is ambiguous, never a guess.
+	const exactSpecialism = remotePeers.filter(
+		row => row.specialism !== undefined && row.specialism === token,
+	);
+	if (exactSpecialism.length === 1) return [...new Set(exactSpecialism.map(row => row.project))];
 	const byPrefix = [...new Set(remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project))];
-	if (specialismFamily.length === 0 && byPrefix.length === 1) return byPrefix;
+	if (byPrefix.length === 1) return byPrefix;
 	return [];
 }
 
@@ -333,11 +331,18 @@ function diagnoseProjectNs(
 	remotePeers: Array<Pick<HubRosterRow, "project" | "specialism">>,
 	token: string,
 ): string[] | null {
+	// Mirror of resolveProjectNs: an exact specialism hit means resolution
+	// succeeded upstream — never diagnose ambiguity from prefix fuzz
+	// ("autoreview" vs "autoreview-two" is suffix disambiguation, not a
+	// collision). Only genuine families (≥2 same-basename cwds or a shared
+	// hash prefix) are ambiguous.
+	const exactSpecialism = remotePeers.filter(
+		row => row.specialism !== undefined && row.specialism === token,
+	);
+	if (exactSpecialism.length === 1) return null;
 	const collisions = [
 		...new Set([
-			...remotePeers
-				.filter(row => row.specialism !== undefined && (row.specialism === token || row.specialism.startsWith(token)))
-				.map(row => row.project),
+			...remotePeers.filter(row => row.specialism !== undefined && row.specialism.startsWith(token)).map(row => row.project),
 			...remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project),
 		]),
 	];
