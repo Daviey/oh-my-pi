@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { parseSessionScopeForTest, parseSystemScopeForTest } from "../../src/irc/messaging";
+import {
+	diagnoseProjectNsForTest,
+	parseSessionScopeForTest,
+	parseSystemScopeForTest,
+	resolveProjectNsForTest,
+} from "../../src/irc/messaging";
 
 describe("parseSessionScope", () => {
 	it("parses a bare session id", () => {
@@ -33,5 +38,46 @@ describe("parseSessionScope", () => {
 
 	it("system scope unaffected", () => {
 		expect(parseSystemScopeForTest("system:Main")).toEqual({ agentId: "Main" });
+	});
+});
+
+describe("resolveProjectNs alias resolution", () => {
+	const roster = [
+		{ project: "aaaa1111aaaa1111", specialism: "vixie-hq" },
+		{ project: "bbbb2222bbbb2222", specialism: "autoreview" },
+		{ project: "bbbb2222bbbb2223", specialism: "autoreview-two" },
+	];
+
+	it("exact hash wins outright", () => {
+		expect(resolveProjectNsForTest(roster, "aaaa1111aaaa1111")).toEqual(["aaaa1111aaaa1111"]);
+	});
+
+	it("unique specialism resolves to its hash", () => {
+		expect(resolveProjectNsForTest(roster, "vixie-hq")).toEqual(["aaaa1111aaaa1111"]);
+	});
+
+	it("exact specialism beats a prefix family — resolves, not ambiguous", () => {
+		// "autoreview" is a unique specialism even though "autoreview-two"
+		// startsWith it: specialism matches are exact, so they win before the
+		// prefix family is consulted. (Pinned after a probe showed the original
+		// ambiguity assumption was wrong.)
+		expect(resolveProjectNsForTest(roster, "autoreview")).toEqual(["bbbb2222bbbb2222"]);
+		expect(diagnoseProjectNsForTest(roster, "autoreview")).toBeNull();
+	});
+
+	it("ambiguous hash prefix resolves to nothing and lists candidates", () => {
+		// "bbbb2" prefixes two registered hashes: ambiguity is an error, never
+		// a guess — and the diagnosis names both so the caller can pick.
+		expect(resolveProjectNsForTest(roster, "bbbb2")).toEqual([]);
+		expect(diagnoseProjectNsForTest(roster, "bbbb2")).toEqual(["bbbb2222bbbb2222", "bbbb2222bbbb2223"]);
+	});
+
+	it("unique hash prefix resolves", () => {
+		expect(resolveProjectNsForTest(roster, "aaaa")).toEqual(["aaaa1111aaaa1111"]);
+	});
+
+	it("unknown token: no match and no ambiguity diagnosis", () => {
+		expect(resolveProjectNsForTest(roster, "zzzz")).toEqual([]);
+		expect(diagnoseProjectNsForTest(roster, "zzzz")).toBeNull();
 	});
 });

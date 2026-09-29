@@ -308,10 +308,19 @@ function resolveProjectNs(
 	token: string,
 ): string[] {
 	if (remotePeers.some(row => row.project === token)) return [token];
-	const bySpecialism = [...new Set(remotePeers.filter(row => row.specialism === token).map(row => row.project))];
-	if (bySpecialism.length === 1) return bySpecialism;
+	// Specialism family: exact name OR names it prefixes ("autoreview" vs
+	// "autoreview-two" collide — two same-basename checkouts disambiguated
+	// by suffix). Any family of >1 is ambiguous, never a guess.
+	const specialismFamily = [
+		...new Set(
+			remotePeers
+				.filter(row => row.specialism !== undefined && (row.specialism === token || row.specialism.startsWith(token)))
+				.map(row => row.project),
+		),
+	];
+	if (specialismFamily.length === 1) return specialismFamily;
 	const byPrefix = [...new Set(remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project))];
-	if (byPrefix.length === 1) return byPrefix;
+	if (specialismFamily.length === 0 && byPrefix.length === 1) return byPrefix;
 	return [];
 }
 
@@ -326,7 +335,9 @@ function diagnoseProjectNs(
 ): string[] | null {
 	const collisions = [
 		...new Set([
-			...remotePeers.filter(row => row.specialism === token).map(row => row.project),
+			...remotePeers
+				.filter(row => row.specialism !== undefined && (row.specialism === token || row.specialism.startsWith(token)))
+				.map(row => row.project),
 			...remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project),
 		]),
 	];
