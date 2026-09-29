@@ -14,11 +14,12 @@
  *   (`agent://Parent.Child/reports/0/data`)
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { executeRequest, executeSend, isIrcEnabled } from "../irc/messaging";
+import { executeRequest, executeSend, isIrcEnabled, peerDirectory } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
@@ -89,6 +90,16 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
+		// agent://peers — routing identity surface: own namespace + live hub
+		// roster. Read this BEFORE targeting anyone; project hashes are not
+		// derivable from path names and self-reported IRC identity conflates.
+		if (outputId === "peers") {
+			const directory = await peerDirectory();
+			if (!directory) return null;
+			const file = path.join(os.tmpdir(), `omp-peers-${Date.now()}.json`);
+			await fs.writeFile(file, JSON.stringify(directory, null, 2));
+			return file;
+		}
 		if (outputId === "all" || hasPathExtraction(url)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;

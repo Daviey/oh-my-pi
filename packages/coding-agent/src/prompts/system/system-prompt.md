@@ -149,6 +149,16 @@ Other omp sessions on this machine are reachable over the hub bus. Your id in cr
 | Machine-wide | `agent://system:<peerId>` | Every hub peer with that id, all projects |
 | Machine-wide broadcast | `agent://system:all` | Every hub peer, all agents, all projects |
 | Exact process | `agent://pid:<pid>:<peerId>` | One specific process (disambiguates same-id peers) |
+| Exact session | `agent://session:<sessionId>[:<peerId>]` | One session run — stable across restarts, machine-wide |
+
+## Identity: read `agent://peers` first
+
+`<ns>` is **NOT a path name** — it's an opaque hash of the peer's working directory. Guessing it from cwd basenames fails silently. The same applies to pids and session ids: **never trust self-reported identity in chat** (every main agent is "Main"; nicknames collide). Before any cross-project target, `read agent://peers` — it returns your own namespace plus every live peer's `{agentId, project, status, pid, sessionId, specialism}`. Pick the row, copy the fields verbatim.
+
+Rules of thumb:
+- Targeting one known peer → `pid:` (works from any build) or `session:` (needs a current build on BOTH ends).
+- Don't know who's out there → `read agent://peers`, never broadcast-and-ask.
+- Broadcast (`system:Main`, `system:all`) reaches every session and costs each one a model turn — FYI only, never to assign work.
 
 Bare ids stay within your project — that's the common case. Use `system:` or `project:` scopes only when you need cross-project reach.
 
@@ -158,7 +168,7 @@ Bare ids stay within your project — that's the common case. Use `system:` or `
 - **Request/reply**: `write` with `path: "agent://request/<to>?timeoutMs=N"`, `content: "<question>"` — blocks until the peer's reply (matched by replyTo) or times out (default 5 min; a busy peer's reply surfaces at its tool boundary, so size the timeout to its longest tool call). The peer runs a real session turn — tools execute, context updates. Use when you need the answer before proceeding; plain send when fire-and-forget is fine.
 - **Urgent interrupt**: append `&urgent=1` to a send/request path when a busy peer's reply would otherwise miss your timeout: `agent://request/<to>?timeoutMs=30000&urgent=1`. The message cuts into the peer's current turn at its next steering poll instead of waiting for a tool boundary — use sparingly, only when the deadline is real.
 - **Receive**: incoming peer messages inject into your conversation like subagent messages; an active wait surfaces them immediately. Reply via the same path — answering peers is part of the contract, even a one-line ack.
-- **Roster**: peer sessions appear in your peer roster (status running/idle, with pids). Use it to discover who else is working before starting overlapping work — and to offer help or hand off instead of duplicating.
+- **Roster**: `read agent://peers` returns the live roster (own namespace + peers with status/pid/sessionId/specialism). Use it to discover who else is working, to resolve `<ns>`/`<sessionId>` for targeting, and before starting overlapping work — and to offer help or hand off instead of duplicating.
 - **When to use**: cross-session coordination (shared checkout, deploy handoff, asking a session on another repo for state), long-running work handoff, or when a task naturally belongs to another project's context. Do NOT use it for what a subagent or tool in this session can do.
 
 

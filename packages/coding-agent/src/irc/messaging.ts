@@ -183,6 +183,11 @@ export function parseSystemScopeForTest(to: string): { agentId: string } | null 
 	return parseSystemScope(to);
 }
 
+/** Visible for tests: session scope syntax. */
+export function parseSessionScopeForTest(to: string): { sessionId: string; agentId: string } | null {
+	return parseSessionScope(to);
+}
+
 /** Reply-correlated request: send, then poll the sender's mailbox for a
  *  message whose `replyTo` equals the sent id. Fail-fast roster check first
  *  (dead peer → immediate error), deadline-bounded wait after (a busy peer's
@@ -280,9 +285,14 @@ function parseSystemScope(to: string): { agentId: string } | null {
  *  the same-id ambiguity when several sessions share (project, Main) without
  *  needing a pid (which changes on restart). Stable across restarts. */
 function parseSessionScope(to: string): { sessionId: string; agentId: string } | null {
-	const match = /^session:(.+)$/.exec(to);
+	// Uniform scope shape: `session:<sessionId>[:<agentId>]`. The agentId
+	// suffix is optional (session: always resolves machine-wide Main) but
+	// ACCEPTED so the documented `:<peerId>` convention from the other
+	// scopes doesn't get swallowed into the sessionId — which produced
+	// misleading "no session \"Main\" with sessionId <uuid>:Main" errors.
+	const match = /^session:([0-9a-fA-F-]+?)(?::([A-Za-z0-9][A-Za-z0-9_-]*))?$/.exec(to);
 	if (!match) return null;
-	return { sessionId: match[1]!, agentId: MAIN_AGENT_ID };
+	return { sessionId: match[1]!, agentId: match[2] ?? MAIN_AGENT_ID };
 }
 
 /** Broker roster rows merged into the registry's remote peer overlay. */
@@ -315,15 +325,37 @@ async function sendProjectScoped(deps: {
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, scope, remotePeers } = deps;
 	const client = currentHubClient();
-	const target: HubTarget = { project: scope.project, agentId: scope.agentId };
+	// Project tokens are the broker's presence hashes (wyhash hex of the peer's
+	// cwd) — opaque to senders, who instinctively use the cwd basename
+	// ("vixie-hq"). Resolve such aliases against the live roster: exact hash
+	// match wins; otherwise accept a unique specialism (cwd basename) or a
+	// unique project-hash prefix match. Ambiguity is an error, never a guess.
+	const resolveProjectNs = (token: string): string[] => {
+		if (remotePeers.some(row => row.project === token)) return [token];
+		const bySpecialism = [...new Set(remotePeers.filter(row => row.specialism === token).map(row => row.project))];
+		if (bySpecialism.length === 1) return bySpecialism;
+		const byPrefix = [...new Set(remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project))];
+		if (byPrefix.length === 1) return byPrefix;
+		return [];
+	};
+	const resolvedNs = client ? resolveProjectNs(scope.project) : [];
 	const roster =
 		scope.agentId === "all"
-			? remotePeers.filter(row => row.project === scope.project && row.agentId !== senderId)
-			: remotePeers.filter(row => row.project === scope.project && row.agentId === scope.agentId);
+			? remotePeers.filter(row => resolvedNs.includes(row.project) && row.agentId !== senderId)
+			: remotePeers.filter(row => resolvedNs.includes(row.project) && row.agentId === scope.agentId);
 	if (!client || roster.length === 0) {
 		const reason = !client
 			? "the system-scope hub is not connected"
-			: `no peer "${scope.agentId}" in project "${scope.project}"`;
+			: (() => {
+					const peers = remotePeers.filter(row => row.agentId === scope.agentId);
+					if (peers.length === 0) return `no peer "${scope.agentId}" on the hub roster`;
+					const known = [...new Set(peers.map(row => row.project))];
+					return (
+						`no peer "${scope.agentId}" in project "${scope.project}". ` +
+						`Project scopes take the peer's registered namespace (broker presence hash), not a path name. ` +
+						`"${scope.agentId}" is registered under: ${known.map(ns => `project:${ns}:${scope.agentId}`).join(", ")}`
+					);
+				})();
 		return coordinationErrorResult(`Failed: ${reason}.`, {
 			op: "send",
 			from: senderId,
@@ -339,8 +371,13 @@ async function sendProjectScoped(deps: {
 		...(deps.urgent ? { urgent: deps.urgent } : {}),
 		...(deps.replyTo ? { replyTo: deps.replyTo } : {}),
 	};
+	// Single-agent targets MUST carry the resolved hash: the peer's
+	// hubTargetMatches compares against its own registered project string, so
+	// an unresolved alias ("vixie-hq") would silently never match.
 	const targets =
-		scope.agentId === "all" ? roster.map(row => ({ project: row.project, agentId: row.agentId })) : [target];
+		scope.agentId === "all"
+			? roster.map(row => ({ project: row.project, agentId: row.agentId }))
+			: roster.map(row => ({ project: row.project, agentId: row.agentId }));
 	const result = await client.publish(hubMessage, targets);
 	const results =
 		result?.results ?? targets.map(entry => ({ to: entry.agentId, ok: false, error: "hub publish failed" }));
@@ -493,4 +530,31 @@ async function sendSessionScoped(deps: {
 /** Namespace qualifier for this process's own project directory. */
 export function ownProjectNamespace(): string {
 	return hubProjectNamespace(process.cwd());
+}
+
+/**
+ * Agent-visible identity surface: the caller's own namespace plus the live
+ * hub roster (other processes only). This is the ONLY sanctioned way for a
+ * session to learn routing identity — project hashes are wyhash hex of the
+ * peer's canonical cwd and are NOT derivable from path names, and
+ * self-reported identity over IRC conflates under id collisions (every main
+ * agent is "Main"). Returns null when the hub is disabled/unreachable.
+ */
+export async function peerDirectory(): Promise<{
+	ownNamespace: string;
+	peers: Array<Pick<HubRosterRow, "agentId" | "project" | "status" | "pid" | "sessionId" | "specialism">>;
+} | null> {
+	if (!isHubEnabled()) return null;
+	const peers = await hubRoster();
+	return {
+		ownNamespace: ownProjectNamespace(),
+		peers: peers.map(row => ({
+			agentId: row.agentId,
+			project: row.project,
+			status: row.status,
+			pid: row.pid,
+			...(row.sessionId ? { sessionId: row.sessionId } : {}),
+			...(row.specialism ? { specialism: row.specialism } : {}),
+		})),
+	};
 }

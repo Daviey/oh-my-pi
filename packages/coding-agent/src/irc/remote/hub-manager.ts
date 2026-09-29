@@ -50,6 +50,8 @@ export interface HubRosterRow {
 	pid: number;
 	sessionFile?: string;
 	sessionId?: string;
+	/** Static role tag from the peer's registration (cwd basename for mains). */
+	specialism?: string;
 	remote: true;
 }
 
