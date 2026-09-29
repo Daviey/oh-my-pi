@@ -294,6 +294,47 @@ function parseSessionScope(to: string): { sessionId: string; agentId: string } |
 	if (!match) return null;
 	return { sessionId: match[1]!, agentId: match[2] ?? MAIN_AGENT_ID };
 }
+/**
+ * Project tokens are the broker's presence hashes (wyhash hex of the peer's
+ * cwd) — opaque to senders, who instinctively use the cwd basename
+ * ("vixie-hq"). Resolve such aliases against the live roster: exact hash
+ * match wins; otherwise accept a unique specialism (cwd basename) or a
+ * unique project-hash prefix match. An empty return means "no match OR
+ * ambiguous" — callers that need to distinguish the two use
+ * diagnoseProjectNs.
+ */
+function resolveProjectNs(
+	remotePeers: Array<Pick<HubRosterRow, "project" | "specialism">>,
+	token: string,
+): string[] {
+	if (remotePeers.some(row => row.project === token)) return [token];
+	const bySpecialism = [...new Set(remotePeers.filter(row => row.specialism === token).map(row => row.project))];
+	if (bySpecialism.length === 1) return bySpecialism;
+	const byPrefix = [...new Set(remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project))];
+	if (byPrefix.length === 1) return byPrefix;
+	return [];
+}
+
+/** Visible for tests: project-namespace alias resolution. */
+export const resolveProjectNsForTest = resolveProjectNs;
+
+/** Disambiguate a failed resolution for error text: null = unknown token,
+ *  array = the colliding candidates (≥2 same-basename cwds, prefix families). */
+function diagnoseProjectNs(
+	remotePeers: Array<Pick<HubRosterRow, "project" | "specialism">>,
+	token: string,
+): string[] | null {
+	const collisions = [
+		...new Set([
+			...remotePeers.filter(row => row.specialism === token).map(row => row.project),
+			...remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project),
+		]),
+	];
+	return collisions.length >= 2 ? collisions : null;
+}
+
+/** Visible for tests: ambiguity diagnosis for failed alias resolution. */
+export const diagnoseProjectNsForTest = diagnoseProjectNs;
 
 /** Broker roster rows merged into the registry's remote peer overlay. */
 function hubRowsToRefs(rows: HubRosterRow[]): AgentRef[] {
@@ -325,20 +366,9 @@ async function sendProjectScoped(deps: {
 }): Promise<AgentToolResult<CoordinationDetails>> {
 	const { senderId, message, scope, remotePeers } = deps;
 	const client = currentHubClient();
-	// Project tokens are the broker's presence hashes (wyhash hex of the peer's
-	// cwd) — opaque to senders, who instinctively use the cwd basename
-	// ("vixie-hq"). Resolve such aliases against the live roster: exact hash
-	// match wins; otherwise accept a unique specialism (cwd basename) or a
-	// unique project-hash prefix match. Ambiguity is an error, never a guess.
-	const resolveProjectNs = (token: string): string[] => {
-		if (remotePeers.some(row => row.project === token)) return [token];
-		const bySpecialism = [...new Set(remotePeers.filter(row => row.specialism === token).map(row => row.project))];
-		if (bySpecialism.length === 1) return bySpecialism;
-		const byPrefix = [...new Set(remotePeers.filter(row => row.project.startsWith(token)).map(row => row.project))];
-		if (byPrefix.length === 1) return byPrefix;
-		return [];
-	};
-	const resolvedNs = client ? resolveProjectNs(scope.project) : [];
+	// Project tokens are resolved against the live roster by the module-scope
+	// resolveProjectNs (hash exact / unique specialism / unique prefix).
+	const resolvedNs = client ? resolveProjectNs(remotePeers, scope.project) : [];
 	const roster =
 		scope.agentId === "all"
 			? remotePeers.filter(row => resolvedNs.includes(row.project) && row.agentId !== senderId)
@@ -350,10 +380,15 @@ async function sendProjectScoped(deps: {
 					const peers = remotePeers.filter(row => row.agentId === scope.agentId);
 					if (peers.length === 0) return `no peer "${scope.agentId}" on the hub roster`;
 					const known = [...new Set(peers.map(row => row.project))];
+					const ambiguous = diagnoseProjectNs(remotePeers, scope.project);
+					const ambiguityNote = ambiguous
+						? ` "${scope.project}" is ambiguous — ${ambiguous.length} registered projects match (same-basename checkouts or a shared hash prefix): ${ambiguous.join(", ")}. Use the full hash.`
+						: "";
 					return (
 						`no peer "${scope.agentId}" in project "${scope.project}". ` +
-						`Project scopes take the peer's registered namespace (broker presence hash), not a path name. ` +
-						`"${scope.agentId}" is registered under: ${known.map(ns => `project:${ns}:${scope.agentId}`).join(", ")}`
+						`Project scopes take the peer's registered namespace (broker presence hash), not a path name.` +
+						ambiguityNote +
+						` "${scope.agentId}" is registered under: ${known.map(ns => `project:${ns}:${scope.agentId}`).join(", ")}`
 					);
 				})();
 		return coordinationErrorResult(`Failed: ${reason}.`, {
@@ -544,7 +579,10 @@ export async function peerDirectory(): Promise<{
 	ownNamespace: string;
 	peers: Array<Pick<HubRosterRow, "agentId" | "project" | "status" | "pid" | "sessionId" | "specialism">>;
 } | null> {
-	if (!isHubEnabled()) return null;
+	// null when the hub is disabled OR disconnected — same signal; callers
+	// should surface "hub unavailable" and not loop; {peers: []} means
+	// hub is up but no other sessions are present.
+	if (!isHubEnabled() || !currentHubClient()) return null;
 	const peers = await hubRoster();
 	return {
 		ownNamespace: ownProjectNamespace(),

@@ -14,7 +14,6 @@
  *   (`agent://Parent.Child/reports/0/data`)
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -90,16 +89,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		// agent://peers — routing identity surface: own namespace + live hub
-		// roster. Read this BEFORE targeting anyone; project hashes are not
-		// derivable from path names and self-reported IRC identity conflates.
-		if (outputId === "peers") {
-			const directory = await peerDirectory();
-			if (!directory) return null;
-			const file = path.join(os.tmpdir(), `omp-peers-${Date.now()}.json`);
-			await fs.writeFile(file, JSON.stringify(directory, null, 2));
-			return file;
-		}
 		if (outputId === "all" || hasPathExtraction(url)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
@@ -174,6 +163,26 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
+		if (outputId === "peers") {
+			// agent://peers — routing identity surface: own namespace + live
+			// hub roster. Read this BEFORE targeting anyone; project hashes
+			// are not derivable from path names and self-reported IRC
+			// identity conflates under id collisions (every main agent is
+			// "Main"). locate() stays null (not file-backed).
+			const directory = await peerDirectory();
+			if (!directory) {
+				throw new Error("agent://peers: hub unavailable (disabled or disconnected). Use agent://pid:<pid>:<peerId> if you have a known-good target.");
+			}
+			const content = JSON.stringify(directory, null, 2);
+			return {
+				url: url.toString(),
+				content,
+				contentType: "application/json",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
