@@ -374,10 +374,10 @@ async function sendProjectScoped(deps: {
 	// Single-agent targets MUST carry the resolved hash: the peer's
 	// hubTargetMatches compares against its own registered project string, so
 	// an unresolved alias ("vixie-hq") would silently never match.
-	const targets =
-		scope.agentId === "all"
-			? roster.map(row => ({ project: row.project, agentId: row.agentId }))
-			: roster.map(row => ({ project: row.project, agentId: row.agentId }));
+	// Both arms of the old ternary were identical after alias resolution:
+	// the roster is already filtered to the resolved namespace, so the
+	// single-agent case needs no separate shape. One publish target list.
+	const targets = roster.map(row => ({ project: row.project, agentId: row.agentId }));
 	const result = await client.publish(hubMessage, targets);
 	const results =
 		result?.results ?? targets.map(entry => ({ to: entry.agentId, ok: false, error: "hub publish failed" }));
