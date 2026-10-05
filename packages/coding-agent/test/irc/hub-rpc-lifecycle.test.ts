@@ -110,6 +110,8 @@ function attachFakeHubClient(bus: IrcBus): {
 		request: () => Promise.resolve(null),
 		setStatus: () => Promise.resolve(),
 		onClose: () => {},
+		onElection: () => {},
+		sendElection: () => {},
 		publish: async () => ({ results: [] }),
 		close: () => {},
 	};

@@ -40,6 +40,8 @@ import {
 	FrameStream,
 	hubTargetMatches,
 	type HubClientFrame,
+	type HubElectionClientFrame,
+	type HubElectionServerFrame,
 	type HubRosterEntry,
 	type HubServerFrame,
 	type HubTarget,
@@ -66,6 +68,9 @@ export function hubPresenceTopic(area: string, agentId: string, pid: number): st
 
 /** How long any single client operation may take before failing open. */
 const REQUEST_TIMEOUT_MS = 2_000;
+
+/** Presence heartbeat interval for the retained-slot republish (ms). */
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 /** Minimal MqttClient surface this transport needs — keeps the fake lean. */
 export interface MqttLikeClient {
@@ -169,6 +174,9 @@ export class MqttHubClient implements HubClientLike {
 	/** In-flight RPC requests keyed by correlation id; first reply resolves. */
 	#rpcWaits = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
 	#requestSink: HubRequestHandler | undefined;
+	#electionSink: ((frame: HubElectionServerFrame) => void) | undefined;
+	/** Periodic presence republish (fresh lastSeen in the retained slot). */
+	#heartbeatTimer: NodeJS.Timeout | undefined;
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
 	#onClose: (() => void) | undefined;
@@ -236,7 +244,8 @@ export class MqttHubClient implements HubClientLike {
 			await connected.subscribeAsync(hubFramesTopic(this.area), { qos: 1 });
 			// Retained snapshots for every present peer ride on this subscription.
 			await connected.subscribeAsync(`hub/${this.area}/presence/+`, { qos: 1 });
-			await connected.publishAsync(presenceTopic, JSON.stringify(identity), { qos: 1, retain: true });
+			await connected.publishAsync(presenceTopic, JSON.stringify({ ...identity, lastSeen: Date.now() }), { qos: 1, retain: true });
+			this.#startHeartbeat(presenceTopic);
 		} catch (error) {
 			logger.warn("hub mqtt: setup failed", { error: errorMessage(error) });
 			await this.#endClient(connected);
@@ -317,6 +326,40 @@ export class MqttHubClient implements HubClientLike {
 		this.#requestSink = handler ?? undefined;
 	}
 
+	/** Register (or clear with null) the sink for election frames. */
+	onElection(handler: ((frame: HubElectionServerFrame) => void) | null): void {
+		this.#electionSink = handler ?? undefined;
+	}
+
+	/** Broadcast one election frame on the shared frames topic, stamped
+	 *  with our agent id (MQTT has no broker to annotate `from`). */
+	sendElection(frame: HubElectionClientFrame): void {
+		const client = this.#client;
+		if (!client || this.#closed) return;
+		void client
+			.publishAsync(hubFramesTopic(this.area), encodeFrame({ ...frame, from: this.#identity?.agentId }), { qos: 1 })
+			.catch(() => {
+				// best-effort broadcast; the next claim/beat retries
+			});
+	}
+
+	/** Presence heartbeat: republish the retained slot with a fresh
+	 *  lastSeen stamp every interval (roster freshness on the area). */
+	#startHeartbeat(presenceTopic: string): void {
+		clearInterval(this.#heartbeatTimer);
+		this.#heartbeatTimer = setInterval(() => {
+			const identity = this.#identity;
+			const client = this.#client;
+			if (!identity || !client) return;
+			void client
+				.publishAsync(presenceTopic, JSON.stringify({ ...identity, lastSeen: Date.now() }), { qos: 1, retain: true })
+				.catch(() => {
+					// best-effort: the next interval retries
+				});
+		}, HEARTBEAT_INTERVAL_MS);
+		this.#heartbeatTimer.unref?.();
+	}
+
 	/** Refresh retained presence with the new status/activity gist. */
 	async setStatus(status: "running" | "idle", activity?: string): Promise<void> {
 		const identity = this.#identity;
@@ -349,6 +392,8 @@ export class MqttHubClient implements HubClientLike {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		clearInterval(this.#heartbeatTimer);
+		this.#heartbeatTimer = undefined;
 		const client = this.#client;
 		this.#client = null;
 		const identity = this.#identity;
@@ -443,6 +488,18 @@ export class MqttHubClient implements HubClientLike {
 					this.#selfPublishes.delete(frame.id);
 					waiter.resolve({ results: [...waiter.rows.values()] });
 				}
+				break;
+			}
+			case "leaderClaim":
+			case "heartbeat": {
+				// Election broadcasts bypass target matching entirely: every
+				// area peer sees them; heartbeats refresh roster rows.
+				if (frame.type === "heartbeat" && frame.from && Number.isFinite(frame.lastSeen)) {
+					for (const entry of this.#roster.values()) {
+						if (entry.agentId === frame.from) entry.lastSeen = frame.lastSeen;
+					}
+				}
+				this.#electionSink?.(frame);
 				break;
 			}
 			default: {

@@ -15,6 +15,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { HubClient, type HubClientLike } from "./client";
 import { MqttHubClient } from "./mqtt";
 import { hubProjectNamespace } from "./broker";
+import { ElectionNode } from "../election";
 import { IrcBus } from "../bus";
 import { redactHubUrl, resolveHubArea, resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
 
@@ -23,6 +24,8 @@ let starting: Promise<HubClientLike | null> | null = null;
 let enabled = false;
 let socketPath = "";
 let armed = false;
+/** Frame-layer election node for this process (leader/middle/member). */
+let election: ElectionNode | null = null;
 
 /** Whether system-scope hub support is armed for this process. */
 export function isHubEnabled(): boolean {
@@ -39,7 +42,13 @@ export async function hubRoster(): Promise<HubRosterRow[]> {
 	const client = current;
 	if (!client) return [];
 	const roster = await client.roster();
-	return roster.map(entry => ({ ...entry, remote: true as const }));
+	// Feed observed peers to the leader so relay-slot assignment tracks
+	// reality, then annotate every row with the lease-derived role.
+	election?.observePeers(roster.map(entry => entry.sessionId ?? "").filter(Boolean));
+	return roster.map(entry => {
+		const role = election?.roleFor(entry.sessionId);
+		return { ...entry, ...(role ? { role } : {}), remote: true as const };
+	});
 }
 
 /** A broker roster row extended for registry merging. */
@@ -50,6 +59,10 @@ export interface HubRosterRow {
 	pid: number;
 	sessionFile?: string;
 	sessionId?: string;
+	/** Self-organized election role (frame-layer leader election). */
+	role?: "leader" | "middle" | "member";
+	/** Epoch-ms presence stamp from the peer's latest heartbeat. */
+	lastSeen?: number;
 	/** Static role tag from the peer's registration (cwd basename for mains). */
 	specialism?: string;
 	remote: true;
@@ -191,9 +204,21 @@ export function setMainIdentityOverrides(options: { sessionId?: string }): void 
 	mainSessionIdOverride = options.sessionId;
 }
 
+/** Wire the frame-layer election node to the live client (leader /
+ *  middle / member self-organization). No session id yet → skip; the
+ *  next connect cycle re-wires with it. */
+function attachElection(client: HubClientLike): void {
+	election?.close();
+	const sessionId = mainSessionIdOverride;
+	if (!sessionId) return;
+	election = new ElectionNode(sessionId);
+	election.attach(client);
+}
+
 /** Post-connect wiring shared by every transport: bus attachment, status
  *  mirror, and the drop-and-retry handler for a dead broker connection. */
 function attachHubClient(client: HubClientLike): void {
+	attachElection(client);
 	IrcBus.global().attachHubClient(client);
 	startStatusSync(client);
 	// Broker died (idle-exit/crash): drop the cached client and
@@ -246,6 +271,8 @@ function startStatusSync(client: HubClientLike): void {
 /** Detach from the broker (test seam and shutdown). */
 export async function shutdownHubClient(): Promise<void> {
 	statusSyncUnsubscribe?.();
+	election?.close();
+	election = null;
 	statusSyncUnsubscribe = undefined;
 	if (retryTimer) {
 		clearTimeout(retryTimer);
@@ -255,6 +282,11 @@ export async function shutdownHubClient(): Promise<void> {
 	current = null;
 	enabled = false;
 	client?.close();
+}
+
+/** Frame-layer election role of this process ("member" when unset). */
+export function currentElectionRole(): "leader" | "middle" | "member" {
+	return election?.electionRole() ?? "member";
 }
 
 /** Ensure the derived default socket's parent directory exists (agent dir). */
@@ -279,4 +311,6 @@ export function resetHubForTests(): void {
 	transport = { kind: "unix", implemented: true };
 	remoteUrl = "";
 	area = "";
+	election?.close();
+	election = null;
 }

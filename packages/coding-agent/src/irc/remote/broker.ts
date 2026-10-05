@@ -474,6 +474,32 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 				conn.socket.end();
 				break;
 			}
+			case "leaderClaim":
+			case "heartbeat": {
+				// Election frames are broadcasts: every connected peer (minus
+				// the sender) sees them verbatim; the broker never interprets
+				// the lease, just like every other dumb-carrier field.
+				if (frame.type === "heartbeat" && Number.isFinite(frame.lastSeen)) {
+					// Presence fold-in: stamp the sender's own roster rows so
+					// snapshots carry liveness (rows are conn-owned, so a
+					// heartbeat cannot forge another peer's stamp).
+					for (const records of rosterByAgent.values()) {
+						for (const record of records) {
+							if (record.conn === conn) record.entry.lastSeen = frame.lastSeen;
+						}
+					}
+				}
+				const fromAgentId = conn.agents.values().next().value ?? "";
+				for (const targetConn of connections) {
+					if (targetConn === conn) continue;
+					try {
+						send(targetConn, { ...frame, from: fromAgentId });
+					} catch {
+						// dead peer connection: the claim reaches the rest
+					}
+				}
+				break;
+			}
 		}
 	}
 

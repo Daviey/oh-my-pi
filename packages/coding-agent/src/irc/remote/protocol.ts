@@ -51,6 +51,12 @@ export interface HubRosterEntry {
 	/** Static role tag: spawn-time task name ("SecurityReviewer") or project
 	 *  context for main agents. Set at registration, never auto-updated. */
 	specialism?: string;
+	/** Self-organized election role: "leader" holds the claim lease,
+	 *  "middle" is a leader-assigned relay slot, everyone else (including
+	 *  never-claiming agents) is "member". Absent on pre-election peers. */
+	role?: "leader" | "middle" | "member";
+	/** Epoch-ms presence stamp from the peer's latest heartbeat. */
+	lastSeen?: number;
 }
 /** A specific cross-project recipient: explicit namespace, or the sender's own when omitted.
  *  `pid` narrows same-id registrations (several sessions share (project, Main)) to one process.
@@ -84,6 +90,14 @@ export type HubClientFrame =
 	 *  answers come back as `reply` frames carrying the same id. */
 	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number; fromProject?: string; urgent?: boolean }
 	| { type: "ping" }
+	/** Election: a leader's broadcast claim over the area. `claimedAt`
+	 *  breaks pure-deadline ties (see election.ts); `middles` is the
+	 *  leader's current relay-slot assignment (additive, optional). `from`
+	 *  is stamped by MQTT senders (no broker to annotate); the unix
+	 *  broker overwrites it with the conn's first agent id. */
+	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string }
+	/** Election: presence heartbeat — carries a fresh `lastSeen` stamp. */
+	| { type: "heartbeat"; lastSeen: number; from?: string }
 	| { type: "bye" };
 
 /** Broker → client frames. */
@@ -102,7 +116,18 @@ export type HubServerFrame =
 	| { type: "request"; id: string; msg: IrcMessage; from?: string; urgent?: boolean }
 	/** Reply routed back to the requester's connection by request id. */
 	| { type: "reply"; id: string; from: string; msg: IrcMessage }
+	/** Election frames (broker-broadcast on unix; frames-topic relay on
+	 *  MQTT): a leader's claim with its lease and relay slots, and the
+	 *  presence heartbeat peers fold into roster rows. `from` identifies
+	 *  the sending connection's first agent id, mirroring request relay. */
+	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string }
+	| { type: "heartbeat"; lastSeen: number; from?: string }
 	| { type: "error"; message: string; code?: "unsupported-version" };
+
+/** Election frame subsets (state machine in irc/election.ts): sent via
+ *  the client's election send path, delivered via its election sink. */
+export type HubElectionClientFrame = Extract<HubClientFrame, { type: "leaderClaim" | "heartbeat" }>;
+export type HubElectionServerFrame = Extract<HubServerFrame, { type: "leaderClaim" | "heartbeat" }>;
 
 /** Whether a roster row satisfies a publish target: agentId must match
  *  exactly; `project` (when set) narrows to that namespace and `pid` (when

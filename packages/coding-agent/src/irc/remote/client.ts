@@ -18,6 +18,8 @@ import {
 	HUB_SOCKET_PATH_ENV,
 	HUB_PROTOCOL_VERSION,
 	type HubClientFrame,
+	type HubElectionClientFrame,
+	type HubElectionServerFrame,
 	type HubRosterEntry,
 	type HubServerFrame,
 	type HubTarget,
@@ -84,6 +86,11 @@ export interface HubClientLike {
 	/** Transmit an RPC request to matching peers and await the first
 	 *  correlated reply; null on timeout or when no peer answers. */
 	request(msg: IrcMessage, targets: HubTarget[], timeoutMs?: number): Promise<HubRequestResult | null>;
+	/** Register (or clear with null) the election-frame sink: the client
+	 *  routes broker/mqtt-relayed leaderClaim/heartbeat frames here. */
+	onElection(handler: ((frame: HubElectionServerFrame) => void) | null): void;
+	/** Broadcast one election frame (leader claim or heartbeat); fire-and-forget. */
+	sendElection(frame: HubElectionClientFrame): void;
 	/** Register (or clear with null) this client's peer-request handler. */
 	onRequest(handler: HubRequestHandler | null): void;
 	setStatus(status: "running" | "idle", activity?: string): Promise<void>;
@@ -105,6 +112,7 @@ export class HubClient {
 	#pending = new Map<string, Waiter[]>();
 	#deliveries: ((msg: IrcMessage) => void) | undefined;
 	#requestSink: HubRequestHandler | undefined;
+	#electionSink: ((frame: HubElectionServerFrame) => void) | undefined;
 	#replies = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
@@ -181,6 +189,23 @@ export class HubClient {
 	/** Register the local handler for broker-relayed peer requests. */
 	onRequest(handler: HubRequestHandler | null): void {
 		this.#requestSink = handler ?? undefined;
+	}
+
+	/** Register (or clear with null) the sink for broker-relayed election
+	 *  frames (leader claims, presence heartbeats). */
+	onElection(handler: ((frame: HubElectionServerFrame) => void) | null): void {
+		this.#electionSink = handler ?? undefined;
+	}
+
+	/** Broadcast one election frame to every peer connection. */
+	sendElection(frame: HubElectionClientFrame): void {
+		const socket = this.#socket;
+		if (!socket || this.#closed) return;
+		try {
+			socket.write(encodeFrame(frame) as string);
+		} catch {
+			// best-effort broadcast; the next claim/beat retries
+		}
 	}
 
 	/** Update this process's roster status + current-work gist (activity is
@@ -290,6 +315,14 @@ export class HubClient {
 			}
 			case "request": {
 				void this.#answerRequest(frame);
+				break;
+			}
+			case "leaderClaim":
+			case "heartbeat": {
+				// Election frames are broadcasts: route to the election
+				// module's sink; heartbeats also refresh roster lastSeen via
+				// the manager-side merge (no waiter semantics).
+				this.#electionSink?.(frame);
 				break;
 			}
 			default: {
