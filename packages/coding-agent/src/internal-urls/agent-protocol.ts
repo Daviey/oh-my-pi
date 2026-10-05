@@ -171,7 +171,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// "Main"). locate() stays null (not file-backed).
 			const directory = await peerDirectory();
 			if (!directory) {
-				throw new Error("agent://peers: hub unavailable (disabled or disconnected). Use agent://pid:<pid>:<peerId> if you have a known-good target.");
+				throw new Error("agent://peers: hub unavailable (disabled or disconnected). If you have a known-good pid from an earlier roster dump, agent://pid:<pid>:<peerId> works; otherwise retry agent://peers when the hub returns.");
 			}
 			const content = JSON.stringify(directory, null, 2);
 			return {

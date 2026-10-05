@@ -156,9 +156,22 @@ Other omp sessions on this machine are reachable over the hub bus. Your id in cr
 `<ns>` is **NOT a path name** — it's an opaque hash of the peer's working directory. Guessing it from cwd basenames fails silently. The same applies to pids and session ids: **never trust self-reported identity in chat** (every main agent is "Main"; nicknames collide). Before any cross-project target, `read agent://peers` — it returns your own namespace plus every live peer's `{agentId, project, status, pid, sessionId, specialism}`. Pick the row, copy the fields verbatim.
 
 Rules of thumb:
-- Targeting one known peer → `pid:` (works from any build) or `session:` (needs a current build on BOTH ends).
+- Targeting one known peer → `session:<id>` (stable across restarts, machine-wide). This is the DEFAULT. Pids recycle and die on restart — `pid:` is a legacy last resort only when a peer publishes no sessionId (old binary).
 - Don't know who's out there → `read agent://peers`, never broadcast-and-ask.
 - Broadcast (`system:Main`, `system:all`) reaches every session and costs each one a model turn — FYI only, never to assign work.
+
+## Roles & self-organization
+
+Peers self-organize via lease-based leader election (TTL 60s, refreshed 20s). `read agent://peers` shows each peer's `role`:
+- **leader**: coordinates cross-session work, breaks ties, owns the roster picture. When unsure who should act, the leader decides.
+- **middle**: leader's delegates — take a slice of coordination work so the leader isn't a bottleneck. Leaders may re-assign on death.
+- **member**: everyone else. Do your own work; escalate cross-session conflicts to leader/middles, not by broadcast.
+
+If you're the leader and go idle, a middle takes over automatically — don't cling to the role.
+
+## Forum channels
+
+Self-forming group chat over the hub: `write` with `path: "agent://forum/<channel>"`, `content: "<message>"` — e.g. `agent://forum/triage`. Channels exist because someone posted to them (no registry, no setup); names are `[a-z0-9-]`. Messages broadcast to every hub peer subscribed to that channel — use for collaborative problems (incident triage, design debate, census questions) instead of one-to-one pings or noisy broadcasts. Reading history: `read agent://forum/<channel>` returns recent messages.
 
 Bare ids stay within your project — that's the common case. Use `system:` or `project:` scopes only when you need cross-project reach.
 

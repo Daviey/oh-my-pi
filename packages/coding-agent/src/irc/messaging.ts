@@ -87,12 +87,15 @@ export async function executeSend(
 		});
 	}
 
-	const systemScoped = parseSystemScope(to);
-	if (systemScoped) {
-		return sendSystemScoped({
+	// Session scope FIRST: session ids are stable across restarts and
+	// machine-wide; pid is a legacy last resort (recycled, host-local).
+		const sessionScoped = parseSessionScope(to);
+	if (sessionScoped) {
+		return sendSessionScoped({
 			senderId,
 			message,
-			agentId: systemScoped.agentId,
+			sessionId: sessionScoped.sessionId,
+			agentId: sessionScoped.agentId,
 			remotePeers,
 			messageId: params.messageId,
 			urgent: params.urgent,
@@ -100,7 +103,10 @@ export async function executeSend(
 		});
 	}
 
-	const pidScoped = parsePidScope(to);
+	// Legacy escape hatch only — prefer session:<id> (stable) or
+	// agent://peers discovery. pid exists for old-binary peers that
+	// publish no sessionId.
+		const pidScoped = parsePidScope(to);
 	if (pidScoped) {
 		return sendPidScoped({
 			senderId,
@@ -114,13 +120,12 @@ export async function executeSend(
 		});
 	}
 
-	const sessionScoped = parseSessionScope(to);
-	if (sessionScoped) {
-		return sendSessionScoped({
+	const systemScoped = parseSystemScope(to);
+	if (systemScoped) {
+		return sendSystemScoped({
 			senderId,
 			message,
-			sessionId: sessionScoped.sessionId,
-			agentId: sessionScoped.agentId,
+			agentId: systemScoped.agentId,
 			remotePeers,
 			messageId: params.messageId,
 			urgent: params.urgent,
