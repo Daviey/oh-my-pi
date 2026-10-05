@@ -4,6 +4,7 @@ import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
 import { currentHubClient, hubRoster, ensureHubClient, isHubEnabled } from "./remote/hub-manager";
+import type { ForumFrame } from "./remote/protocol";
 import { hubProjectNamespace } from "./remote/broker";
 import type { HubTarget } from "./remote/protocol";
 import type { AgentRef } from "../registry/agent-registry";
@@ -586,6 +587,62 @@ async function sendSessionScoped(deps: {
 /** Namespace qualifier for this process's own project directory. */
 export function ownProjectNamespace(): string {
 	return hubProjectNamespace(process.cwd());
+}
+
+/**
+ * Forum-channel history: per-channel ring buffer of recent broadcast frames
+ * (own posts included). Populated by the hub-client wiring when forum frames
+ * arrive; bounded so idle channels don't accumulate.
+ */
+const forumLog = new Map<string, ForumFrame[]>();
+const FORUM_LOG_MAX = 200;
+
+/** Visible for tests: clear forum history between cases. */
+export function resetForumForTests(): void {
+	forumLog.clear();
+}
+
+/** Wire forum-frame ingestion (hub-manager calls this on client attach). */
+export function ingestForumFrame(frame: ForumFrame): void {
+	const log = forumLog.get(frame.channel) ?? [];
+	log.push(frame);
+	if (log.length > FORUM_LOG_MAX) log.splice(0, log.length - FORUM_LOG_MAX);
+	forumLog.set(frame.channel, log);
+}
+
+/** Read a channel's recent history (newest last). Empty when nothing
+ *  ingested yet; the transport-absent gate lives at the protocol layer. */
+export function executeForumRead(channel: string): ForumFrame[] {
+	return forumLog.get(channel) ?? [];
+}
+
+/** Post to a self-forming forum channel via the hub client. */
+export async function executeForumPost(
+	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
+	params: { channel: string; message: string },
+): Promise<AgentToolResult<CoordinationDetails>> {
+	const { senderId } = deps;
+	const { channel, message } = params;
+	if (isHubEnabled()) await ensureHubClient();
+	const client = currentHubClient();
+	const detail = { op: "send" as const, from: senderId, to: `forum:${channel}` };
+	if (!client || typeof client.forumPublish !== "function") {
+		return coordinationErrorResult(
+			"Failed: forum channels unavailable (hub not connected or transport lacks forum support).",
+			detail,
+		);
+	}
+	if (!message.trim()) return coordinationErrorResult("Forum posts require non-empty content.", detail);
+	try {
+		await client.forumPublish(channel, message);
+		return {
+			content: [{ type: "text", text: `Posted to forum:${channel}.` }],
+			details: detail,
+			isError: false,
+		};
+	} catch (err) {
+		return coordinationErrorResult(`Failed: ${(err as Error).message}`, detail);
+	}
 }
 
 /**

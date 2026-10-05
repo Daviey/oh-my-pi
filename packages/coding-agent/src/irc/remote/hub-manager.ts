@@ -17,6 +17,7 @@ import { MqttHubClient } from "./mqtt";
 import { hubProjectNamespace } from "./broker";
 import { ElectionNode } from "../election";
 import { IrcBus } from "../bus";
+import { ingestForumFrame } from "../messaging";
 import { redactHubUrl, resolveHubArea, resolveHubSocketPath, resolveHubTransport } from "../../hub/settings";
 
 let current: HubClientLike | null = null;
@@ -219,6 +220,9 @@ function attachElection(client: HubClientLike): void {
  *  mirror, and the drop-and-retry handler for a dead broker connection. */
 function attachHubClient(client: HubClientLike): void {
 	attachElection(client);
+	// Forum history: ingest broadcast frames so read agent://forum/<channel>
+	// has local context without any central store.
+	client.onForum?.(frame => ingestForumFrame(frame));
 	IrcBus.global().attachHubClient(client);
 	startStatusSync(client);
 	// Broker died (idle-exit/crash): drop the cached client and

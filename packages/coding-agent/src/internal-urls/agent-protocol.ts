@@ -18,7 +18,8 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { executeRequest, executeSend, isIrcEnabled, peerDirectory } from "../irc/messaging";
+import { executeForumPost, executeForumRead, executeRequest, executeSend, isIrcEnabled, peerDirectory } from "../irc/messaging";
+import { currentHubClient } from "../irc/remote/hub-manager";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
@@ -108,6 +109,18 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
+		// agent://forum/<channel> — post to a self-forming forum channel.
+		// `forum` is a RESERVED id like request/all/peers.
+		const rawHost0 = url.rawHost || url.hostname;
+		if (rawHost0 === "forum") {
+			const channel = decodeURIComponent(url.pathname.replace(/^\//, ""));
+			const result = await executeForumPost({ registry, senderId, sessionFileHint: session.getSessionFile?.() }, { channel, message: content });
+			return {
+				content: [{ type: "text", text: result.content.find(item => item.type === "text")?.text ?? "Forum post failed." }],
+				details: { message: result.details },
+				isError: result.isError,
+			};
+		}
 		// agent://request/<to>?timeoutMs=N — synchronous request/reply: blocks
 		// (bounded) until the peer's reply with matching replyTo arrives or the
 		// timeout elapses. `request` is a RESERVED id: a peer literally named
@@ -163,6 +176,23 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
+		if (outputId === "forum") {
+			const channel = decodeURIComponent(url.pathname.replace(/^\//, ""));
+			const client = currentHubClient();
+			if (!client || typeof client.onForum !== "function") {
+				throw new Error("agent://forum: no hub client — forum history unavailable.");
+			}
+			const log = executeForumRead(channel);
+			const content = log.length === 0 ? "(no messages yet on this channel)" : log.map(f => `[${new Date(f.ts).toISOString()}] ${f.from}: ${f.body}`).join("\n");
+			return {
+				url: url.toString(),
+				content,
+				contentType: "text/plain",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
 		if (outputId === "peers") {
 			// agent://peers — routing identity surface: own namespace + live
 			// hub roster. Read this BEFORE targeting anyone; project hashes

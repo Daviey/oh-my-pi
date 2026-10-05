@@ -1,5 +1,6 @@
 `agent://<id>`: output; nested IDs dotted, `/key/index` JSON path; write = message, `agent://all` broadcast only.
 `peers` is a reserved read id: `read agent://peers` → `{ownNamespace, peers[]}` (your project hash + live roster with project/pid/sessionId/specialism). Read it BEFORE any cross-project target — `<ns>` is that hash, never a path name.
+`forum` is a reserved id: `write agent://forum/<channel>` posts (self-forming channel, `[a-z0-9-]` names); `read agent://forum/<channel>` returns recent history. `request` and `forum` are reserved like `all`/`peers`.
 
 - **Retry ladder** for a busy peer:
     1. `write agent://request/<peer>?timeoutMs=30000` — ordinary; if the peer is mid-interruptible wait (bash/eval), the message cuts in immediately via the steering poll; if it's in an exclusive long tool call, the reply surfaces at the next tool boundary (size the timeout accordingly).
