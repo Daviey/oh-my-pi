@@ -35,10 +35,12 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type * as MqttModule from "mqtt";
 import { resolveHubArea } from "../../hub/settings";
 import {
+	assertValidForumChannel,
 	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
 	FrameStream,
 	hubTargetMatches,
+	type ForumFrame,
 	type HubClientFrame,
 	type HubElectionClientFrame,
 	type HubElectionServerFrame,
@@ -175,7 +177,10 @@ export class MqttHubClient implements HubClientLike {
 	#rpcWaits = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
 	#requestSink: HubRequestHandler | undefined;
 	#electionSink: ((frame: HubElectionServerFrame) => void) | undefined;
-	/** Periodic presence republish (fresh lastSeen in the retained slot). */
+	/** Forum broadcast handlers. */
+	#forumHandlers = new Set<(frame: ForumFrame) => void>();
+	/** Composite self-echo keys (from|fromSessionId|channel|ts|body). */
+	#selfForumEcho = new Set<string>();
 	#heartbeatTimer: NodeJS.Timeout | undefined;
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
@@ -343,6 +348,50 @@ export class MqttHubClient implements HubClientLike {
 			});
 	}
 
+	/** Post to a forum channel: rides the SHARED frames topic like every
+	 *  other frame (no dedicated forum topic), self-stamped with our agent
+	 *  id — MQTT has no broker to annotate `from`. Fire-and-forget. */
+	async forumPublish(channel: string, body: string): Promise<void> {
+		const client = this.#client;
+		assertValidForumChannel(channel);
+		if (!client || this.#closed) return;
+		const identity = this.#identity;
+		const frame: ForumFrame = {
+			kind: "forum",
+			channel,
+			from: identity?.agentId ?? "",
+			...(identity?.sessionId ? { fromSessionId: identity.sessionId } : {}),
+			body,
+			ts: Date.now(),
+		};
+		const echoKey = `${frame.from}|${frame.fromSessionId ?? ""}|${frame.channel}|${frame.ts}|${frame.body}`;
+		this.#selfForumEcho.add(echoKey);
+		void client
+			.publishAsync(hubFramesTopic(this.area), encodeFrame(frame), { qos: 1 })
+			.catch(() => {
+				// best-effort broadcast; the caller re-posts if it mattered
+			});
+	}
+
+	/** Subscribe to forum broadcasts; the returned function unsubscribes. */
+	onForum(handler: (frame: ForumFrame) => void): () => void {
+		this.#forumHandlers.add(handler);
+		return () => this.#forumHandlers.delete(handler);
+	}
+
+	/** Dispatch one inbound forum broadcast: skip our own echo (the unix
+	 *  broker never delivers a publish back to its sender), then fan out to
+	 *  every handler — no target matching anywhere on this path. */
+	/** Dispatch one inbound forum broadcast: skip our own echo (keyed on
+	 *  the composite frame stamp so millisecond collisions don't eat a
+	 *  peer's same-ms post), then fan out — no target matching anywhere. */
+	#dispatchForum(frame: ForumFrame): void {
+		const echoKey = `${frame.from}|${frame.fromSessionId ?? ""}|${frame.channel}|${frame.ts}|${frame.body}`;
+		if (!this.#selfForumEcho.delete(echoKey)) {
+			for (const handler of this.#forumHandlers) handler(frame);
+		}
+	}
+
 	/** Presence heartbeat: republish the retained slot with a fresh
 	 *  lastSeen stamp every interval (roster freshness on the area). */
 	#startHeartbeat(presenceTopic: string): void {
@@ -459,6 +508,12 @@ export class MqttHubClient implements HubClientLike {
 
 	/** Dispatch one decoded frame: peer publishes deliver+ack, acks resolve. */
 	#onFrame(frame: HubClientFrame | HubServerFrame): void {
+		// Forum posts bypass hubTargetMatches entirely: every area peer sees
+		// them (broadcast, not addressed); self-echo suppressed in #dispatchForum.
+		if (frame.type === undefined) {
+			this.#dispatchForum(frame);
+			return;
+		}
 		switch (frame.type) {
 			case "publish": {
 				this.#onPeerPublish(frame);

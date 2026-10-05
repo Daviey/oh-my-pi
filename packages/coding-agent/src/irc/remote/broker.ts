@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { dlopen as dlopenType, FFIType as ffiTypeType } from "bun:ffi";
 import {
+	assertValidForumChannel,
 	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
 	FrameStream,
@@ -277,6 +278,27 @@ export async function startHubBroker(options: HubBrokerOptions): Promise<void> {
 		// broker routes it back to the requester's connection.
 		frame: Exclude<HubClientFrame | HubServerFrame, { type: "error" }>,
 	): void {
+		// Forum posts are kind-discriminated broadcasts: fan out to every
+		// OTHER connected peer with zero target matching (forums are not
+		// hubTargetMatches-addressed), stamping the sender's agent id.
+		if ("kind" in frame && frame.kind === "forum") {
+			try {
+				assertValidForumChannel(frame.channel);
+			} catch {
+				logger.debug("hub broker: dropping malformed forum post", { socketPath, channel: frame.channel });
+				return;
+			}
+			const senderAgentId = conn.agents.values().next().value ?? "";
+			for (const targetConn of connections) {
+				if (targetConn === conn) continue;
+				try {
+					send(targetConn, { ...frame, from: senderAgentId });
+				} catch {
+					// dead peer connection: the post reaches the rest
+				}
+			}
+			return;
+		}
 		switch (frame.type) {
 			case "hello": {
 				// Protocol version gate: major mismatch is a typed rejection so

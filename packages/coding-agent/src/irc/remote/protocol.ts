@@ -68,6 +68,31 @@ export interface HubTarget {
 	sessionId?: string;
 }
 
+/** A forum-channel post: broadcast to every peer on the area — never
+ *  roster/target addressed. `from` is stamped by MQTT senders; the unix
+ *  broker overwrites it with the publishing connection's first agent id.
+ *  `kind` is the wire discriminator (the union's `type` stays undefined on
+ *  this member so type-keyed dispatch keeps compiling); `fromSessionId`
+ *  anchors the poster's session run when known. */
+export interface ForumFrame {
+	kind: "forum";
+	type?: undefined;
+	channel: string;
+	from: string;
+	fromSessionId?: string;
+	body: string;
+	ts: number;
+}
+
+/** Valid forum channel names: lowercase slug, 1–64 chars. Publish-time
+ *  validation keeps forums from smuggling routing/roster syntax. */
+const FORUM_CHANNEL_PATTERN = /^[a-z0-9-]{1,64}$/;
+
+/** Throw unless `channel` is a valid forum channel name. */
+export function assertValidForumChannel(channel: string): void {
+	if (!FORUM_CHANNEL_PATTERN.test(channel)) throw new Error(`invalid forum channel: ${JSON.stringify(channel)}`);
+}
+
 
 /** Client → broker frames. */
 export type HubClientFrame =
@@ -98,7 +123,10 @@ export type HubClientFrame =
 	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string }
 	/** Election: presence heartbeat — carries a fresh `lastSeen` stamp. */
 	| { type: "heartbeat"; lastSeen: number; from?: string }
-	| { type: "bye" };
+	| { type: "bye" }
+	/** Forum-channel post — broadcast to every connected peer; the broker
+	 *  stamps `from` from the publishing connection. See {@link ForumFrame}. */
+	| ForumFrame;
 
 /** Broker → client frames. */
 export type HubServerFrame =
@@ -122,7 +150,9 @@ export type HubServerFrame =
 	 *  the sending connection's first agent id, mirroring request relay. */
 	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string }
 	| { type: "heartbeat"; lastSeen: number; from?: string }
-	| { type: "error"; message: string; code?: "unsupported-version" };
+	| { type: "error"; message: string; code?: "unsupported-version" }
+	/** Forum-channel post relayed by the broker (broadcast fan-out). */
+	| ForumFrame;
 
 /** Election frame subsets (state machine in irc/election.ts): sent via
  *  the client's election send path, delivered via its election sink. */

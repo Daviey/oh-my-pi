@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import {
+	assertValidForumChannel,
 	DEFAULT_HUB_IDLE_GRACE_MS,
 	DEFAULT_REQUEST_TIMEOUT_MS,
 	encodeFrame,
@@ -17,6 +18,7 @@ import {
 	HUB_IDLE_GRACE_ENV,
 	HUB_SOCKET_PATH_ENV,
 	HUB_PROTOCOL_VERSION,
+	type ForumFrame,
 	type HubClientFrame,
 	type HubElectionClientFrame,
 	type HubElectionServerFrame,
@@ -91,6 +93,11 @@ export interface HubClientLike {
 	onElection(handler: ((frame: HubElectionServerFrame) => void) | null): void;
 	/** Broadcast one election frame (leader claim or heartbeat); fire-and-forget. */
 	sendElection(frame: HubElectionClientFrame): void;
+	/** Post one message to a forum channel (broadcast to every area peer).
+	 *  Throws on invalid channel names — validated before anything is sent. */
+	forumPublish?(channel: string, body: string): Promise<void>;
+	/** Subscribe to forum-channel posts; returns the unsubscribe function. */
+	onForum?(handler: (frame: ForumFrame) => void): () => void;
 	/** Register (or clear with null) this client's peer-request handler. */
 	onRequest(handler: HubRequestHandler | null): void;
 	setStatus(status: "running" | "idle", activity?: string): Promise<void>;
@@ -113,6 +120,7 @@ export class HubClient {
 	#deliveries: ((msg: IrcMessage) => void) | undefined;
 	#requestSink: HubRequestHandler | undefined;
 	#electionSink: ((frame: HubElectionServerFrame) => void) | undefined;
+	#forumHandlers = new Set<(frame: ForumFrame) => void>();
 	#replies = new Map<string, { resolve: (result: HubRequestResult | null) => void; timer: NodeJS.Timeout }>();
 	#identity: HubAgentIdentity | undefined;
 	#closed = false;
@@ -208,6 +216,34 @@ export class HubClient {
 		}
 	}
 
+	/** Post to a forum channel: fire-and-forget broadcast (no ack semantics —
+	 *  forums are lossy by design, unlike addressed publishes). */
+	async forumPublish(channel: string, body: string): Promise<void> {
+		const socket = this.#socket;
+		assertValidForumChannel(channel);
+		if (!socket || this.#closed) return;
+		const identity = this.#identity;
+		const frame: ForumFrame = {
+			kind: "forum",
+			channel,
+			from: identity?.agentId ?? "",
+			...(identity?.sessionId ? { fromSessionId: identity.sessionId } : {}),
+			body,
+			ts: Date.now(),
+		};
+		try {
+			socket.write(encodeFrame(frame) as string);
+		} catch {
+			// best-effort broadcast; the caller re-posts if it mattered
+		}
+	}
+
+	/** Subscribe to forum broadcasts; the returned function unsubscribes. */
+	onForum(handler: (frame: ForumFrame) => void): () => void {
+		this.#forumHandlers.add(handler);
+		return () => this.#forumHandlers.delete(handler);
+	}
+
 	/** Update this process's roster status + current-work gist (activity is
 	 *  debounced by the caller; the broker overwrites on receipt). */
 	async setStatus(status: "running" | "idle", activity?: string): Promise<void> {
@@ -300,6 +336,12 @@ export class HubClient {
 	}
 
 	#onFrame(frame: HubServerFrame): void {
+		// Forum posts bypass type dispatch entirely: kind-discriminated,
+		// type stays undefined on that union member.
+		if (frame.type === undefined) {
+			for (const handler of this.#forumHandlers) handler(frame);
+			return;
+		}
 		switch (frame.type) {
 			case "deliver": {
 				this.#deliveries?.(frame.msg);
@@ -369,7 +411,7 @@ export class HubClient {
 	 * Send a request and await the matching response frame. Keyed by response
 	 * type: hello→welcome, roster→roster, publish→publishAck, ping→pong.
 	 */
-	static readonly #RESPONSE_TYPE: Partial<Record<HubClientFrame["type"], HubServerFrame["type"]>> = {
+	static readonly #RESPONSE_TYPE: Partial<Record<Exclude<HubClientFrame["type"], undefined>, HubServerFrame["type"]>> = {
 		hello: "welcome",
 		roster: "roster",
 		publish: "publishAck",
@@ -379,6 +421,8 @@ export class HubClient {
 	#request(frame: HubClientFrame): Promise<HubServerFrame | null> {
 		const socket = this.#socket;
 		if (!socket || this.#closed) return Promise.resolve(null);
+		// Forum posts are fire-and-forget broadcasts, never request/response.
+		if (frame.type === undefined) return Promise.resolve(null);
 		const responseKey = HubClient.#RESPONSE_TYPE[frame.type];
 		if (!responseKey) return Promise.resolve(null);
 		const { promise, resolve } = Promise.withResolvers<HubServerFrame | null>();
