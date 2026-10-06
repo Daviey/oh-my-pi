@@ -7836,6 +7836,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
+	showRevertTurnSelector(): void {
+		void this.#selectorController.showRevertTurnSelector();
+	}
+
 	showSessionSelector(source?: ForeignSessionSource): void {
 		void this.#selectorController.showSessionSelector(source);
 	}
