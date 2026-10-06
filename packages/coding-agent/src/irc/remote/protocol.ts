@@ -1,0 +1,212 @@
+/**
+ * Wire protocol for the system-scope hub broker: newline-delimited JSON frames
+ * over a per-user unix socket. Only same-uid peers may connect (enforced by
+ * the broker via SO_PEERCRED plus 0600 socket permissions); there is no TCP.
+ */
+import type { AgentStatus } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+
+/** Broker idle grace env (ms without a connected peer before the daemon exits). */
+export const HUB_IDLE_GRACE_ENV = "OMP_HUB_IDLE_GRACE_MS";
+/** Socket path env passed to the spawned broker daemon. */
+export const HUB_SOCKET_PATH_ENV = "OMP_HUB_SOCKET_PATH";
+
+/** Default ms without any connected peer before the broker daemon exits. */
+export const DEFAULT_HUB_IDLE_GRACE_MS = 30_000;
+
+/** Wire protocol version. Major mismatch → broker rejects with a typed
+ *  error frame; minors are additive and ignored by older peers. */
+export const HUB_PROTOCOL_VERSION = 1;
+
+/** Default ms a request/reply RPC waits for a correlated reply before
+ *  resolving null (client request timeout and broker pending-entry TTL).
+ *  120s matches a typical model turn; 2s timed out every real turn and
+ *  caught script callers without an explicit timeoutMs off guard. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+/** Peer client identities. The broker never interprets these — carried and
+ *  echoed for consumer-side routing/claim decisions. */
+export type HubClientKind = "omp" | "hermes" | "webhook" | (string & {});
+
+/** What a peer can do with a delivered frame: "inject" = steer a live turn /
+ *  wake an idle one (interactive sessions), "poll" = drain buffered frames
+ *  on demand (webhooks, batch clients). "forum" = wants forum-channel
+ *  broadcasts (backlog + fan-out), "election" = wants election frames.
+ *  Absent = send-only. Unknown capabilities are ignored (forward-compat). */
+export type HubCapability = "inject" | "poll" | "forum" | "election" | (string & {});
+
+/** One roster row: an agent visible to the whole user's machine. */
+export interface HubRosterEntry {
+	agentId: string;
+	/** Project namespace (wyhash hex of the canonical project directory). */
+	project: string;
+	status: Extract<AgentStatus, "running" | "idle">;
+	pid: number;
+	sessionFile?: string;
+	/** Leaf id of the registered session (basename suffix of sessionFile).
+	 *  Lets senders address a specific RUN of an agent id — stable across
+	 *  process restarts, unlike pid. Absent on legacy peers. */
+	sessionId?: string;
+	/** Current-work gist (one bounded line, executor-maintained). Dynamic —
+	 *  refreshed via status frames; absent when idle. */
+	activity?: string;
+	/** Static role tag: spawn-time task name ("SecurityReviewer") or project
+	 *  context for main agents. Set at registration, never auto-updated. */
+	specialism?: string;
+	/** Self-organized election role: "leader" holds the claim lease,
+	 *  "middle" is a leader-assigned relay slot, everyone else (including
+	 *  never-claiming agents) is "member". Absent on pre-election peers. */
+	role?: "leader" | "middle" | "member";
+	/** Epoch-ms presence stamp from the peer's latest heartbeat. */
+	lastSeen?: number;
+}
+/** A specific cross-project recipient: explicit namespace, or the sender's own when omitted.
+ *  `pid` narrows same-id registrations (several sessions share (project, Main)) to one process.
+ *  `sessionId` anchors to a specific run of that agent id (stable across restarts). */
+export interface HubTarget {
+	project?: string;
+	agentId: string;
+	pid?: number;
+	sessionId?: string;
+}
+
+/** A forum-channel post: broadcast to every peer on the area — never
+ *  roster/target addressed. `from` is stamped by MQTT senders; the unix
+ *  broker overwrites it with the publishing connection's first agent id.
+ *  `kind` is the wire discriminator (the union's `type` stays undefined on
+ *  this member so type-keyed dispatch keeps compiling); `fromSessionId`
+ *  anchors the poster's session run when known. */
+export interface ForumFrame {
+	kind: "forum";
+	type?: undefined;
+	channel: string;
+	from: string;
+	fromSessionId?: string;
+	body: string;
+	ts: number;
+	/** Thread field: `${from}|${ts}` composite id of the post being replied
+	 *  to (forum frames have no message id; this stamp is the id). */
+	inReplyTo?: string;
+}
+
+/** Valid forum channel names: lowercase slug, 1–64 chars. Publish-time
+ *  validation keeps forums from smuggling routing/roster syntax. */
+const FORUM_CHANNEL_PATTERN = /^[a-z0-9-]{1,64}$/;
+
+/** Throw unless `channel` is a valid forum channel name. */
+export function assertValidForumChannel(channel: string): void {
+	if (!FORUM_CHANNEL_PATTERN.test(channel)) throw new Error(`invalid forum channel: ${JSON.stringify(channel)}`);
+}
+
+
+/** Client → broker frames. */
+export type HubClientFrame =
+	| {
+			type: "hello";
+			/** Protocol major version; broker rejects mismatched majors. */
+			v: number;
+			client?: { name: HubClientKind; version: string; capabilities: HubCapability[] };
+			/** Optional forum-channel subscription: the broker gates forum
+			 *  fan-out to these (absent = all channels; "board" always
+			 *  flows). Additive — v1 peers ignore it. */
+			channels?: string[];
+			agents: HubRosterEntry[];
+	  }
+	/** Activity refresh: debounced client-side (on-change, ≥5s apart). */
+	| { type: "status"; agentId: string; status: "running" | "idle"; activity?: string; sessionId?: string }
+	| { type: "roster" }
+	/** `fromProject` scopes bare targets to the sender's namespace — the
+	 *  MQTT receive side uses it to mirror the unix broker's conn.project
+	 *  resolution (no central broker on MQTT; each peer self-addresses). */
+	| { type: "publish"; msg: IrcMessage; targets: HubTarget[]; fromProject?: string; urgent?: boolean }
+	/** RPC: transmit `msg` to matching peers and await a correlated reply.
+	 *  `id` is the request correlation id (distinct from any IrcMessage id);
+	 *  answers come back as `reply` frames carrying the same id. */
+	| { type: "request"; id: string; msg: IrcMessage; targets: HubTarget[]; timeoutMs?: number; fromProject?: string; urgent?: boolean }
+	| { type: "ping" }
+	/** Election: a leader's broadcast claim over the area. `claimedAt`
+	 *  breaks pure-deadline ties (see election.ts); `middles` is the
+	 *  leader's current relay-slot assignment (additive, optional). `from`
+	 *  is stamped by MQTT senders (no broker to annotate); the unix
+	 *  broker overwrites it with the conn's first agent id. */
+	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string; sentTs?: number; brokerTs?: number }
+	/** Election: graceful abdication — the current leader broadcasts on
+	 *  clean shutdown so followers contest the open seat after
+	 *  claimDelayMs instead of waiting out the lease. Additive. */
+	| { type: "leaderAbdicate"; leaderSessionId: string; from?: string; sentTs?: number; brokerTs?: number }
+	/** Election: presence heartbeat — carries a fresh `lastSeen` stamp. */
+	| { type: "heartbeat"; lastSeen: number; from?: string; sentTs?: number }
+	| { type: "bye" }
+	/** Forum-channel post — broadcast to every connected peer; the broker
+	 *  stamps `from` from the publishing connection. See {@link ForumFrame}. */
+	| ForumFrame;
+
+/** Broker → client frames. */
+export type HubServerFrame =
+	| { type: "welcome"; v: number; self: string; roster: HubRosterEntry[] }
+	| { type: "roster"; roster: HubRosterEntry[] }
+	| { type: "deliver"; msg: IrcMessage }
+	| { type: "publishAck"; id: string; results: { to: string; ok: boolean; error?: string }[] }
+	| { type: "pong" }
+	| { type: "bye" }
+	/** Broker-forwarded request to an answering peer (deliver-style; the
+	 *  requester's agentId rides in `msg.from`). */
+	/** Broker→peer relay of a request frame. `from` is the requester's first
+	 *  registered agentId on its publishing connection (may be empty for raw
+	 *  script clients); the answering handler uses it to address its reply. */
+	| { type: "request"; id: string; msg: IrcMessage; from?: string; urgent?: boolean }
+	/** Reply routed back to the requester's connection by request id. */
+	| { type: "reply"; id: string; from: string; msg: IrcMessage }
+	/** Election frames (broker-broadcast on unix; frames-topic relay on
+	 *  MQTT): a leader's claim with its lease and relay slots, and the
+	 *  presence heartbeat peers fold into roster rows. `from` identifies
+	 *  the sending connection's first agent id, mirroring request relay. */
+	| { type: "leaderClaim"; leaderSessionId: string; leaseUntil: number; claimedAt: number; middles?: string[]; from?: string; sentTs?: number; brokerTs?: number }
+	| { type: "leaderAbdicate"; leaderSessionId: string; from?: string; sentTs?: number; brokerTs?: number }
+	| { type: "heartbeat"; lastSeen: number; from?: string; sentTs?: number }
+	| { type: "error"; message: string; code?: "unsupported-version" }
+	/** Forum-channel post relayed by the broker (broadcast fan-out). */
+	| ForumFrame;
+
+/** Election frame subsets (state machine in irc/election.ts): sent via
+ *  the client's election send path, delivered via its election sink. */
+export type HubElectionClientFrame = Extract<HubClientFrame, { type: "leaderClaim" | "leaderAbdicate" | "heartbeat" }>;
+export type HubElectionServerFrame = Extract<HubServerFrame, { type: "leaderClaim" | "leaderAbdicate" | "heartbeat" }>;
+
+/** Whether a roster row satisfies a publish target: agentId must match
+ *  exactly; `project` (when set) narrows to that namespace and `pid` (when
+ *  set) narrows same-id registrations to one process. Shared by the unix
+ *  broker's fan-out and the mqtt client's receive-side self-addressing. */
+export function hubTargetMatches(target: HubTarget, entry: { agentId: string; project: string; pid: number; sessionId?: string }): boolean {
+	if (target.agentId !== entry.agentId) return false;
+	if (target.project !== undefined && target.project !== entry.project) return false;
+	if (typeof target.pid === "number" && entry.pid !== target.pid) return false;
+	if (target.sessionId !== undefined && entry.sessionId !== target.sessionId) return false;
+	return true;
+}
+
+/** Encode one frame as a newline-terminated JSON line. */
+export function encodeFrame(frame: HubClientFrame | HubServerFrame): string {
+	return `${JSON.stringify(frame)}\n`;
+}
+
+/** Incremental NDJSON frame parser shared by client and broker connections. */
+export class FrameStream {
+	#buffer = "";
+	push(chunk: string | Buffer): (HubClientFrame | HubServerFrame)[] {
+		this.#buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+		const frames: (HubClientFrame | HubServerFrame)[] = [];
+		let index: number;
+		while ((index = this.#buffer.indexOf("\n")) !== -1) {
+			const line = this.#buffer.slice(0, index).trim();
+			this.#buffer = this.#buffer.slice(index + 1);
+			if (!line) continue;
+			try {
+				frames.push(JSON.parse(line));
+			} catch {
+				frames.push({ type: "error", message: "malformed frame" });
+			}
+		}
+		return frames;
+	}
+}
