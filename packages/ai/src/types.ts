@@ -1161,6 +1161,16 @@ export interface ContextSnapshot {
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
 }
+export interface RoutingReport {
+	requested: string;
+	route: string;
+	reason: string;
+	method: string;
+	failovers: {
+		provider: string;
+		reason: string;
+	}[];
+}
 
 export interface AssistantMessage {
 	role: "assistant";
@@ -1197,6 +1207,8 @@ export interface AssistantMessage {
 	 * other than what was requested.
 	 */
 	upstreamModel?: string;
+	/** Router decision trace when a gateway/route layer selected or failed over providers. */
+	routingReport?: RoutingReport;
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;

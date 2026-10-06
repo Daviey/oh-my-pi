@@ -261,7 +261,7 @@ describe("AgentSession retry recovery", () => {
 		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
 			rewriteStarted.resolve();
 			await resumeRewrite.promise;
-			await rewriteEntries();
+			return (await rewriteEntries()) ?? true;
 		});
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		const unsubscribe = session.subscribe(event => {
