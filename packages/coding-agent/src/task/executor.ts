@@ -3799,6 +3799,11 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 			));
 		} catch (error) {
 			mcpFollower?.dispose();
+			// The factory can reject before constructing an AgentSession and does
+			// not dispose an externally supplied manager — close the reopened manager
+			// so its live-pid owner claim does not pin the session against undo-tail
+			// gc in the parent.
+			void reopened.close().catch(() => {});
 			throw error;
 		}
 		mcpFollower?.bind(revived);
@@ -3806,11 +3811,19 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// Re-run the executor's extension wiring on the rebuilt session. Skipping it leaves the
 		// runner pre-init, so a `tool_call` handler touching a runtime action trips the
 		// fail-closed gate and blocks every tool (including `yield`) in the revived agent (issue #8824).
-		await initializeExtensions(revived, {
-			reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-			reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			filterActiveTools: toolNames => (capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo")),
-		});
+		try {
+			await initializeExtensions(revived, {
+				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				filterActiveTools: toolNames => (capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo")),
+			});
+		} catch (err) {
+			// Post-factory wiring can still reject before the caller receives the
+			// session; on failure nobody disposes it — dispose the constructed
+			// session (its dispose closes the reopened manager) rather than leaking both.
+			void revived.dispose().catch(() => {});
+			throw err;
+		}
 		AgentRegistry.global().syncSessionStatus(id, revived);
 		attachIrcWakeTurnMonitor(revived, capture.wake);
 		return revived;
@@ -4052,6 +4065,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		let sessionCreatedAt: number | undefined;
 		let readyAt: number | undefined;
 
+		// Abandoned-manager tracking: the eager SessionManager.open inside
+		// the try registers a live-pid owner sidecar claim the moment it
+		// loads, but setup can fail or abort before the consumption boundary.
+		// `unconsumedSessionManager` holds a fulfilled-but-unconsumed manager
+		// (cleared at adoption); `setupAbandonedBeforeAdoption` covers the
+		// abort-before-fulfillment order, where the promise settles only
+		// after the finally has already run. Both paths close the manager so
+		// its claim cannot pin the session against undo-tail gc in the parent
+		// until this process exits. Closure-scoped because the finally is a
+		// sibling block of the try.
+		let unconsumedSessionManager: SessionManager | undefined;
+		let setupAbandonedBeforeAdoption = false;
 		try {
 			checkAbort();
 			// Pin authStorage to modelRegistry.authStorage — mirrors the createAgentSession invariant.
@@ -4187,6 +4212,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
+			// The opened manager registers a live-pid owner sidecar claim the
+			// moment it loads. Setup below can fail or abort before the
+			// consumption boundary (~line 3169), and an abandoned-but-open
+			// manager would keep that claim on disk — undo-tail gc in the
+			// long-lived parent then skips the session until this process
+			// exits. Track the fulfilled manager so those exits can close it;
+			// adoption clears the holder.
+			sessionManagerPromise.then(
+				manager => {
+					if (setupAbandonedBeforeAdoption) {
+						void manager.close().catch(() => {});
+						return;
+					}
+					unconsumedSessionManager = manager;
+				},
+				() => {},
+			);
 			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
 			// `task.agentPrewalk` settings override hands the subagent off to a
 			// fast/cheap target at its first edit/write — the same mechanism as the
@@ -4338,6 +4380,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
+			// Consumed: the manager's owner claim is now the session's to
+			// release (dispose/close paths below).
+			unconsumedSessionManager = undefined;
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -4372,6 +4417,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
 				void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				sessionPromise?.catch(() => {
+					void sessionManager.close().catch(() => {});
+				});
 				throw err;
 			}
 			mcpFollower?.bind(session);
@@ -4553,6 +4601,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				error = err instanceof Error ? err.stack || err.message : String(err);
 			}
 		} finally {
+			// Setup exited (abort or error) before adoption: release the
+			// abandoned manager's live-pid owner claim so undo-tail gc in
+			// the parent does not skip the session until process exit. A
+			// promise that fulfills after this point closes itself via the
+			// flag above.
+			setupAbandonedBeforeAdoption = true;
+			if (unconsumedSessionManager) {
+				const abandoned = unconsumedSessionManager;
+				unconsumedSessionManager = undefined;
+				void abandoned.close().catch(() => {});
+			}
 			const cleanupDeadlineAt = Date.now() + cleanupGraceMs;
 			const cleanupChangeStatus =
 				worktree === undefined

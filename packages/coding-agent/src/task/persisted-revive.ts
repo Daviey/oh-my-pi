@@ -10,6 +10,7 @@ import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
+import { loadSessionFile } from "../session/session-loader";
 import type { AgentSession } from "../session/agent-session";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
@@ -106,7 +107,14 @@ export function createPersistedSubagentReviverFactory(
 				suppressBreadcrumb: true,
 				throwIfMissing: true,
 			});
-			const entries = reopened.getEntries();
+			// Validate the contract from storage, not the reopened manager's
+			// entries: `open` may be intercepted (capability-shimmed managers in
+			// embedders, test doubles) while the transcript on disk remains the
+			// source of truth for what may be revived. Re-reading also rebuilds
+			// from a file rewritten after the factory's peek rather than a stale
+			// capture, and keeps `open` purely the writer/lock handle.
+			const loaded = await loadSessionFile(sessionFile);
+			const entries = loaded.entries;
 			const init = extractSessionInit(entries);
 			if (!init) {
 				await reopened.close();
@@ -162,6 +170,11 @@ export function createPersistedSubagentReviverFactory(
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			// The factory can reject before constructing an AgentSession (e.g.
+			// expected registry generation gone) and does not dispose an
+			// externally supplied manager — close the reopened manager so its
+			// live-pid owner claim does not pin the session against undo-tail
+			// gc in the parent.
 			let session: AgentSession;
 			try {
 				({ session } = await createAgentSession({
@@ -226,28 +239,39 @@ export function createPersistedSubagentReviverFactory(
 								mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 							}),
 				}));
-			} catch (error) {
-				mcpFollower?.dispose();
-				throw error;
+			} catch (err) {
+				// Factory rejected before constructing a session: nothing will
+				// dispose the externally supplied manager — close it so its
+				// live-pid owner claim does not pin the session against
+				// undo-tail gc in the parent.
+				void reopened.close().catch(() => {});
+				throw err;
 			}
-			mcpFollower?.bind(session);
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
-			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
-			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
-			// Wire the extension runtime exactly as the live executor does. Without
-			// this the runner stays pre-init, every action method throws
-			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
-			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
-			// blocking every tool — including the hidden `yield` — in the revived
-			// agent. `session_start` also re-runs so extensions restore per-session
-			// state (issue #8824).
-			await initializeExtensions(session, {
-				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			});
+			// Post-factory setup can still reject before the caller receives
+			// the session; on failure nobody disposes it, so guard the whole
+			// revival setup interval and dispose the constructed session (its
+			// dispose closes the reopened manager) rather than leaking both.
+			try {
+				// Clamp the active set to the persisted list: createAgentSession's
+				// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+				// the original run didn't carry. Unknown/missing names are ignored.
+				await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+				// Wire the extension runtime exactly as the live executor does. Without
+				// this the runner stays pre-init, every action method throws
+				// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
+				// touches a runtime action trips the fail-closed gate in `emitToolCall`,
+				// blocking every tool — including the hidden `yield` — in the revived
+				// agent. `session_start` also re-runs so extensions restore per-session
+				// state (issue #8824).
+				await initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				});
+			} catch (err) {
+				void session.dispose().catch(() => {});
+				throw err;
+			}
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,

@@ -252,6 +252,8 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		sm = await SessionManager.open(inputPath, undefined, undefined, {
 			suppressBreadcrumb: true,
 			throwIfMissing: true,
+			// Read-only inspection: never append an .owner sidecar claim.
+			noOwnerClaim: true,
 		});
 	} catch (err) {
 		if (isEnoent(err)) throw new Error(`File not found: ${inputPath}`);
