@@ -48,7 +48,9 @@ function formatServerCount(count: number): string {
 	return count === 1 ? "server" : "servers";
 }
 function sanitizeMcpStatusError(error: string): string {
-	return sanitizeMcpStatusText(error, TRUNCATE_LENGTHS.CONTENT);
+	// Error strings embed URLs (which carry key-laden query params) and can
+	// echo Authorization headers — strip credential shapes before display.
+	return sanitizeMcpStatusText(redactSecrets(error), TRUNCATE_LENGTHS.CONTENT);
 }
 
 export function formatMCPConnectingMessage(serverNames: readonly string[]): string {

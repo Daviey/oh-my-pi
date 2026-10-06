@@ -5,13 +5,11 @@
  * without maintaining persistent connections.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseEvents, redactSecrets, SENSITIVE_QUERY_PARAM } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
-
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
 
 /**
  * Redact credential-bearing query params (e.g. `exaApiKey`) so failed
@@ -190,18 +188,47 @@ export async function callMCP(
 		if (options?.onHttpError) {
 			throw options.onHttpError(response, await response.text());
 		}
-		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
+		// statusText can echo reason phrases with embedded credentials; the thrown
+		// error reaches UI status lines, so pass it through the text-level barrier.
+		const errorMsg = redactSecrets(`MCP request failed: ${response.status} ${response.statusText}`);
 		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
 		throw new Error(errorMsg);
 	}
 
+	// Tap the body as it streams: response.clone() deadlocks on a live SSE
+	// stream (tee holds the source open until BOTH branches read), and
+	// clone-after-consume throws ERR_BODY_ALREADY_USED. A TransformStream
+	// copies each chunk as it passes, so the parse-failure catch can log the
+	// received bytes without ever blocking the SSE reader.
+	const bodyChunks: Uint8Array[] = [];
+	const tapped = response.body!.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				bodyChunks.push(chunk);
+				controller.enqueue(chunk);
+			},
+		}),
+	);
+	const tappedResponse = new Response(tapped, response);
+	const tappedText = async (): Promise<string> => {
+		const total = bodyChunks.reduce((n, c) => n + c.length, 0);
+		const out = new Uint8Array(total);
+		let offset = 0;
+		for (const chunk of bodyChunks) {
+			out.set(chunk, offset);
+			offset += chunk.length;
+		}
+		return new TextDecoder().decode(out);
+	};
 	try {
-		return await readMcpJsonRpcResponse(response, body.id, signal);
+		return await readMcpJsonRpcResponse(tappedResponse, body.id, signal);
 	} catch (error) {
+		const text = await tappedText().catch(() => "");
 		logger.error("Failed to parse MCP response", {
 			url: redactUrlForLog(url),
 			method,
 			error: error instanceof Error ? error.message : String(error),
+			responseText: redactSecrets(text.slice(0, 500)),
 		});
 		throw options?.onParseError?.(error) ?? error;
 	}
