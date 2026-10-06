@@ -828,13 +828,19 @@ export class SessionMaintenance {
 		const keepRecent = Math.max(0, opts?.keepRecent ?? 1);
 		const branchEntries = this.#host.sessionManager.getBranch();
 		// Identify the keep-set first: the last `keepRecent` entries (walking
-		// backwards) that would yield at least one stripped image.
+		// backwards) that would yield at least one stripped image. Recency
+		// protects conversation image turns only — tool-result images are
+		// maintenance content and always droppable.
 		const keep = new Set<unknown>();
 		if (keepRecent > 0) {
 			let kept = 0;
 			for (let i = branchEntries.length - 1; i >= 0 && kept < keepRecent; i--) {
 				const entry = branchEntries[i];
-				if (entryHasImages(entry)) {
+				if (
+					entryHasImages(entry) &&
+					entry.type === "message" &&
+					entry.message.role !== "toolResult"
+				) {
 					keep.add(entry);
 					kept++;
 				}

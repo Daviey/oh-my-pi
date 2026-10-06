@@ -1594,6 +1594,8 @@ describe("AgentSession user undo/redo", () => {
 				{
 					model: () => undefined,
 					agent: { state: { messages, tools: [] } },
+					evalPreludes: () => [],
+					sessionAgents: () => [],
 					settings: Settings.isolated(),
 				} as unknown as ConstructorParameters<typeof SessionTools>[0],
 				{

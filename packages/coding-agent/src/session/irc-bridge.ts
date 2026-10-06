@@ -47,7 +47,12 @@ export class IrcBridge {
 	 *  sessions): dedup then lives in this bridge instance's memory only —
 	 *  never a shared `undefined.irc-seen` in the process cwd. */
 	#seenIdsPath(): string | undefined {
-		const sessionFile = this.#host.sessionManager.getSessionFile();
+		// Upstream's bridge host contract allows hosts without a session
+		// manager (e.g. the envelope-escape harness) — same in-memory-only
+		// dedup as an in-memory session.
+		const manager = this.#host.sessionManager;
+		if (!manager) return undefined;
+		const sessionFile = manager.getSessionFile();
 		return sessionFile ? `${sessionFile}.irc-seen` : undefined;
 	}
 

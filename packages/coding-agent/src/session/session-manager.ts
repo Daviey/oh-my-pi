@@ -183,6 +183,12 @@ function getSidecarLockPath(sessionFile: string): string {
 // lock path: #appendWriter uses it to hand the claim off to a contending
 // sibling manager (close-and-take) instead of throwing.
 const sessionWriterOwners = new Map<string, SessionManager>();
+// Same-process holders of a session file's own path lock, by resolved lock
+// path: a second same-process acquire of the OS lock always fails, so
+// append/rewrite paths must not contend a lock this process already holds
+// (the draft-only first-entry wrapper, a fenced atomic publish, or moveTo's
+// source lock). Mirrors sidecarLockHolders' re-entrancy contract.
+const sessionFileLockHolders = new Map<string, number>();
 
 async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>): Promise<T> {
 	// withFileLock derives `<sidecar>.lock` for the sidecar file itself —
@@ -1289,6 +1295,16 @@ export class SessionManager {
 	#writer: SessionStorageWriter | undefined;
 	#writerLock: FileLockHandle | undefined;
 	/**
+	 * True when the current session file was adopted through the DIRECT
+	 * `setSessionFile()` entry (the gc/maintenance pattern — production gc
+	 * itself preflights owner claims and skips live sessions, so this guard
+	 * is defense-in-depth for direct adopters) rather than a resume through
+	 * `open()`. A direct adopter facing a live FOREIGN writer fails fast
+	 * instead of silently forking to a sibling; resumed sessions keep the
+	 * open-elsewhere move-off grace.
+	 */
+	#directSessionFileAdoption = false;
+	/**
 	 * Successful sidecar claim appends by THIS manager, per session file,
 	 * decremented one-for-one by removals. Read/written only inside
 	 * sidecar-tail callbacks, so the accounting settles in tail order — a
@@ -1644,6 +1660,31 @@ export class SessionManager {
 		this.#notifyPersistenceNotice({ reason, from, to });
 		return to;
 	}
+	/**
+	 * True when the session file's OS lock is held by a live FOREIGN writer —
+	 * not this process (its own writer, a draft-wrapper/fenced-publish/moveTo
+	 * scope) and not a same-process sibling manager (which hands off instead).
+	 * A foreign writer means another process is actively appending or
+	 * replacing the journal right now: queueing our own rewrite or silently
+	 * diverting to a sibling would either interleave with the holder's
+	 * replacement or fork the session, so callers fail fast with
+	 * {@link SessionFileLockError} instead.
+	 */
+	#foreignWriterHoldsSessionFile(): boolean {
+		if (!this.#sessionFile || !(this.#storage instanceof FileSessionStorage)) return false;
+		const probe = tryAcquireFileLock(this.#sessionFile);
+		if (probe?.acquired) {
+			probe.release();
+			return false;
+		}
+		probe?.release();
+		const key = lockPathFor(this.#sessionFile);
+		// A same-process scope (draft wrapper, fenced publish, moveTo) or a
+		// same-process sibling writer (handoff contract) is not foreign.
+		if ((sessionFileLockHolders.get(key) ?? 0) > 0) return false;
+		return sessionWriterOwners.get(key) === undefined;
+	}
+
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
 		const epoch = options.epoch ?? this.#diskEpoch;
@@ -2022,6 +2063,19 @@ export class SessionManager {
 				const holder = sessionWriterOwners.get(lockPathFor(this.#sessionFile));
 				if (holder) holder.#closeWriterEventually();
 				lock = tryAcquireFileLock(this.#sessionFile);
+				if (
+					!lock?.acquired &&
+					// A draft-wrapper/fenced-publish/moveTo scope in THIS process
+					// holds the path lock: it serializes this append against the
+					// publish it guards, so the append may proceed without its
+					// own claim (the scope releases after) instead of failing.
+					(sessionFileLockHolders.get(lockPathFor(this.#sessionFile)) ?? 0) > 0
+				) {
+					return this.#storage.openWriter(this.#sessionFile, {
+						flags: "a",
+						onError: err => this.#noteDiskFailure(err),
+					});
+				}
 				if (!lock?.acquired) {
 					lock?.release();
 					throw new SessionFileLockError(this.#sessionFile);
@@ -2153,7 +2207,26 @@ export class SessionManager {
 		// writer closed, no append fd outlives the replacement below.
 		this.#closeWriterEventually();
 
+		// Ownership BEFORE the exclusive claim: a non-owner must divert to a
+		// sibling without ever contending the owner's writer lock — acquiring
+		// first would throw SessionFileLockError against the live owner's
+		// held lock and kill the writer instead of moving it off. A fresh
+		// adopter that has never written here and finds a FOREIGN WRITER
+		// actively holding the file lock fails fast instead of diverting:
+		// queueing a rewrite past it would interleave with the holder's
+		// replacement or fork the session. The established owner and any
+		// manager that has already written keep the move-off grace.
+		if (
+			this.#sessionOwnedElsewhere() &&
+			this.#directSessionFileAdoption &&
+			this.#foreignWriterHoldsSessionFile()
+		) {
+			throw new SessionFileLockError(this.#sessionFile!);
+		}
+		if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
+
 		let rewriteLock: FileLockHandle | null = null;
+		let rewriteLockKey: string | undefined;
 		if (this.#persist) {
 			// Same exclusive claim the append writer holds, covering the
 			// replacement itself: an appender that woke up between gc's owner
@@ -2164,12 +2237,25 @@ export class SessionManager {
 				rewriteLock = tryAcquireFileLock(targetPath);
 				if (!rewriteLock?.acquired) {
 					rewriteLock?.release();
-					throw new SessionFileLockError(targetPath);
+					rewriteLock = null;
+					// A scope in THIS process holds the path lock (moveTo's
+					// staged source lock, the draft wrapper, a fenced
+					// publish): it serializes this rewrite against the
+					// operation it guards, so proceed under its claim
+					// instead of contending ourselves.
+					if ((sessionFileLockHolders.get(lockPathFor(targetPath)) ?? 0) === 0) {
+						throw new SessionFileLockError(targetPath);
+					}
+				} else {
+					// Register the hold: an append this process issues during
+					// the write below (test hooks, flush continuations) must
+					// not see its own claim as a foreign writer.
+					rewriteLockKey = lockPathFor(targetPath);
+					sessionFileLockHolders.set(rewriteLockKey, (sessionFileLockHolders.get(rewriteLockKey) ?? 0) + 1);
 				}
 			}
 		}
 		try {
-			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
 			let body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
@@ -2244,6 +2330,11 @@ export class SessionManager {
 			this.#noteDiskFailure(err);
 		} finally {
 			rewriteLock?.release();
+			if (rewriteLockKey !== undefined) {
+				const remaining = (sessionFileLockHolders.get(rewriteLockKey) ?? 1) - 1;
+				if (remaining > 0) sessionFileLockHolders.set(rewriteLockKey, remaining);
+				else sessionFileLockHolders.delete(rewriteLockKey);
+			}
 		}
 	}
 
@@ -2295,7 +2386,16 @@ export class SessionManager {
 			do {
 				this.#atomicRewriteDirty = false;
 				await this.#closeWriterHandle();
-				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
+				if (this.#sessionOwnedElsewhere()) {
+					// Same contract as the synchronous rewrite: a fresh adopter
+					// facing a live FOREIGN writer raises instead of silently
+					// publishing to a sibling — whole-file rewrites under
+					// contention reject, they never fork the session.
+					if (this.#directSessionFileAdoption && this.#foreignWriterHoldsSessionFile()) {
+						throw new SessionFileLockError(this.#sessionFile!);
+					}
+					this.#moveOffSessionFile("open-elsewhere");
+				}
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
@@ -2304,12 +2404,18 @@ export class SessionManager {
 				// resuming the session after gc's owner preflight cannot open
 				// an append fd onto the inode this replace detaches.
 				let publishLock: FileLockHandle | null = null;
+				let publishLockKey: string | undefined;
 				if (this.#storage instanceof FileSessionStorage) {
 					publishLock = tryAcquireFileLock(sessionFile);
 					if (!publishLock?.acquired) {
 						publishLock?.release();
 						throw new SessionFileLockError(sessionFile);
 					}
+					// Register the hold: a same-process append racing inside
+					// writeTextAtomic (the race tests hook it) must not treat
+					// this process's own claim as a foreign writer.
+					publishLockKey = lockPathFor(sessionFile);
+					sessionFileLockHolders.set(publishLockKey, (sessionFileLockHolders.get(publishLockKey) ?? 0) + 1);
 				}
 				const body = this.#fileBody();
 				try {
@@ -2376,6 +2482,11 @@ export class SessionManager {
 					throw error;
 				} finally {
 					publishLock?.release();
+					if (publishLockKey !== undefined) {
+						const remaining = (sessionFileLockHolders.get(publishLockKey) ?? 1) - 1;
+						if (remaining > 0) sessionFileLockHolders.set(publishLockKey, remaining);
+						else sessionFileLockHolders.delete(publishLockKey);
+					}
 				}
 				if (this.#diskEpoch !== epoch) return false;
 				this.#recordFullRewrite(body);
@@ -2426,11 +2537,23 @@ export class SessionManager {
 			this.#entries.every(candidate => candidate === entry || isDraftOnlyMetadataEntry(candidate))
 		) {
 			try {
-				this.#storage.withSessionFileLockSync(this.#sessionFile, () => this.#appendToCurrentSessionFile(entry));
+				// The wrapper holds the session file's own path lock; register
+				// the hold so the append it serializes does not contend it in
+				// this process (see #appendWriter).
+				const key = lockPathFor(this.#sessionFile);
+				sessionFileLockHolders.set(key, (sessionFileLockHolders.get(key) ?? 0) + 1);
+				this.#storage.withSessionFileLockSync(this.#sessionFile, () =>
+					this.#appendToCurrentSessionFile(entry),
+				);
 			} catch (err) {
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				this.#noteDiskFailure(err);
+			} finally {
+				const key = lockPathFor(this.#sessionFile);
+				const remaining = (sessionFileLockHolders.get(key) ?? 1) - 1;
+				if (remaining > 0) sessionFileLockHolders.set(key, remaining);
+				else sessionFileLockHolders.delete(key);
 			}
 			return;
 		}
@@ -2948,6 +3071,7 @@ export class SessionManager {
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#setSessionFile(sessionFile);
+		this.#directSessionFileAdoption = true;
 	}
 
 	async #setSessionFile(
@@ -2959,6 +3083,7 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#directSessionFileAdoption = false;
 		// A switch gives up the previous file. Opening claims nothing: the first
 		// write does, so inspecting a session never counts as owning it.
 		this.#sessionClaim?.release?.();
@@ -3308,6 +3433,17 @@ export class SessionManager {
 			// Every persisted move rewrites the journal (at least its header cwd),
 			// even when the path stays the same.
 			await assertSourceIsOurs(this.#sessionFile);
+			// A live FOREIGN WRITER on the journal is the sharper refusal, but
+			// only for a PATH-CHANGING move — a same-path cwd change is
+			// serialized by the fenced rewrite's own publish lock (the fork
+			// rule), and callers (gc, maintenance) distinguish lock
+			// contention and retry on it.
+			const samePath =
+				targetSessionDir !== undefined &&
+				path.resolve(targetSessionDir) === path.dirname(path.resolve(this.#sessionFile!));
+			if (!samePath && this.#foreignWriterHoldsSessionFile()) {
+				throw new SessionFileLockError(this.#sessionFile!);
+			}
 			this.#claimSession();
 			if (this.#sessionClaim?.release === undefined) {
 				throw new SessionMoveRefusedError(
@@ -3336,6 +3472,7 @@ export class SessionManager {
 		// appending to the replaced-away inode while this manager rewrites
 		// the destination, losing those entries.
 		let sourceLock: FileLockHandle | undefined;
+		let sourceLockKey: string | undefined;
 		try {
 			if (this.#persist && this.#sessionFile) {
 				this.#storage.ensureDirSync(nextSessionDir);
@@ -3368,6 +3505,15 @@ export class SessionManager {
 						throw new SessionFileLockError(oldSessionFile);
 					}
 					sourceLock = lock;
+					// Register the hold so appends this process issues during
+					// the staged move (cross-device copy hooks, flush
+					// continuations) recognize their own holder instead of
+					// contending it as a foreign writer.
+					sourceLockKey = lockPathFor(oldSessionFile);
+					sessionFileLockHolders.set(
+						sourceLockKey,
+						(sessionFileLockHolders.get(sourceLockKey) ?? 0) + 1,
+					);
 				}
 
 				let sessionMoved = false;
@@ -3451,8 +3597,12 @@ export class SessionManager {
 
 					if (preClaimedDestination) {
 						// The journal never stayed at the destination — drop
-						// the premature claim; the old one is untouched.
+						// the premature claim; the old one is untouched. The
+						// removal is chained on the sidecar tail, so drain it
+						// before rethrowing: an aborting caller must not
+						// observe a leftover destination sidecar.
 						this.#releaseOwnerClaim(newSessionFile);
+						await this.#sidecarTail;
 					}
 					throw err;
 				}
@@ -3513,6 +3663,11 @@ export class SessionManager {
 			this.#sessionFileRelocating = null;
 			// The destination is ours or untouched now.
 			destination?.release();
+			if (sourceLockKey !== undefined) {
+				const remaining = (sessionFileLockHolders.get(sourceLockKey) ?? 1) - 1;
+				if (remaining > 0) sessionFileLockHolders.set(sourceLockKey, remaining);
+				else sessionFileLockHolders.delete(sourceLockKey);
+			}
 			sourceLock?.release();
 		}
 	}
@@ -3821,6 +3976,16 @@ export class SessionManager {
 				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
 			}
 		}
+		// Closing gives up this process's ownership lease; a later write
+		// reclaims it. Released AFTER the sidecar claims above settle (the
+		// same gc-vs-close ordering that keeps the writer close and the
+		// sidecar removal ordered), but never skipped: without this the
+		// id-keyed lease lives until process exit and every other process
+		// resuming the session bounces to a sibling (or refuses a moveTo)
+		// long after this manager went away.
+		const claim = this.#sessionClaim;
+		claim?.release?.();
+		if (claim) claim.release = undefined;
 		await this.#pendingArtifactCopy?.done;
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
