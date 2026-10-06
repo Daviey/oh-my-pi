@@ -11,6 +11,7 @@
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { HubClientLike } from "./remote/client";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
@@ -43,14 +44,51 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	/** Send observers: fire-and-forget taps on every outgoing message (used by
+	 *  the hub RPC handler to capture the wake-turn relay reply). */
+	#sendListeners: ((message: IrcMessage) => void)[] = [];
+	/** Deliver observers: fire-and-forget taps on every incoming message that
+	 *  reaches a live consumer (waiter/injection/revival). Lets correlated
+	 *  requesters observe replies that bypass the mailbox — a successful
+	 *  delivery is consumed by the recipient and never buffered. */
+	#deliverListeners: ((message: IrcMessage) => void)[] = [];
+
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	/** System-scope hub client when attached; null keeps delivery strictly in-process. */
+	#hubClient: HubClientLike | null = null;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/**
+	 * Attach the system-scope hub client. Once attached, sends to ids absent
+	 * from the local registry are relayed through the broker (its `deliver`
+	 * frames re-enter THIS bus locally, reusing injected/woken/revived);
+	 * broadcast fan-out gains broker roster peers. Disabled/unreachable hub
+	 * never reaches this path.
+	 */
+	attachHubClient(client: HubClientLike): void {
+		this.#hubClient = client;
+		client.onDelivery(msg => {
+			// Relay re-enters the local machinery; never echo back over the socket.
+			void this.#deliver(msg, { suppressRelay: false });
+		});
+		// Transport-level RPC sink; the agent-side handler registers via
+		// {@link setHubRequestHandler} (no turn-logic wiring here).
+		client.onRequest((msg, from) => this.#hubRequestHandler?.(msg, from) ?? null);
+	}
+
+	/** Registered peer-request handler; null = this process declines all. */
+	#hubRequestHandler: ((msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null) | undefined;
+
+	/** Register (or clear with null) the handler answering peer RPC requests. */
+	setHubRequestHandler(handler: ((msg: IrcMessage, from: string) => Promise<IrcMessage | null> | IrcMessage | null) | null): void {
+		this.#hubRequestHandler = handler ?? undefined;
 	}
 
 	/**
@@ -70,8 +108,22 @@ export class IrcBus {
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
-		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+	async send(msg: Omit<IrcMessage, "id" | "ts"> & { id?: string }, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+		const message: IrcMessage = { ...msg, id: msg.id ?? Snowflake.next(), ts: Date.now() };
+		for (const listener of [...this.#sendListeners]) {
+			try {
+				listener(message);
+			} catch {
+				// Observer failures never block the send path.
+			}
+		}
+		// Local recipients take the in-process path synchronously — no await
+		// before #deliver, so park cancel-window timing is unchanged (the hub
+		// adds zero ticks to today's behavior). Only unknown ids consult the hub.
+		if (this.#hubClient && !this.#registry.get(message.to)) {
+			const hubReceipt = await this.#deliverViaHub(message);
+			if (hubReceipt) return hubReceipt;
+		}
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);
@@ -84,6 +136,31 @@ export class IrcBus {
 		return receipt;
 	}
 
+	/** Observe every outgoing send (fire-and-forget; listener errors are
+	 *  swallowed). Returns an unsubscribe function. */
+	onSend(listener: (message: IrcMessage) => void): () => void {
+		this.#sendListeners.push(listener);
+		return () => {
+			const index = this.#sendListeners.indexOf(listener);
+			if (index !== -1) this.#sendListeners.splice(index, 1);
+		};
+	}
+
+	/** Observe every incoming delivery that reaches a live consumer —
+	 *  waiter-resolved, injected into a session, or park-revived (not failed
+	 *  sends, which buffer to the mailbox instead). Correlated requesters use
+	 *  this to catch replies the recipient's turn consumes directly: without
+	 *  it, a successful same-process reply never resolves a `takeMatching`
+	 *  wait, because consumption bypasses the mailbox. Fire-and-forget;
+	 *  listener errors are swallowed. Returns an unsubscribe function. */
+	onDeliver(listener: (message: IrcMessage) => void): () => void {
+		this.#deliverListeners.push(listener);
+		return () => {
+			const index = this.#deliverListeners.indexOf(listener);
+			if (index !== -1) this.#deliverListeners.splice(index, 1);
+		};
+	}
+
 	/**
 	 * Whether `from` successfully sent `to` anything at or after `sinceTs`.
 	 * The wake-turn relay uses it to skip agents that already answered their
@@ -92,6 +169,28 @@ export class IrcBus {
 	sentSince(from: string, to: string, sinceTs: number): boolean {
 		const ts = this.#lastSent.get(from)?.get(to);
 		return ts !== undefined && ts >= sinceTs;
+	}
+
+	/**
+	 * Route a targeted send through the system-scope broker when the recipient
+	 * is not a local registry ref and the hub is attached. Returns null to
+	 * fall through to the in-process path (local recipient, hub detached, or
+	 * broker failure).
+	 */
+	async #deliverViaHub(message: IrcMessage): Promise<IrcDeliveryReceipt | null> {
+		const client = this.#hubClient;
+		if (!client) return null;
+		const result = await client.publish(message, [{ agentId: message.to }]);
+		if (!result) return null;
+		const ok = result.results.find(entry => entry.to === message.to && entry.ok);
+		if (!ok) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: result.results.find(entry => entry.to === message.to)?.error ?? "hub publish failed",
+			};
+		}
+		return { to: message.to, outcome: "injected" };
 	}
 
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
@@ -158,6 +257,7 @@ export class IrcBus {
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
+			this.#notifyDeliver(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
@@ -169,6 +269,7 @@ export class IrcBus {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message);
+			this.#notifyDeliver(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
@@ -271,9 +372,44 @@ export class IrcBus {
 		return this.#takeFromMailbox(agentId, from);
 	}
 
+	/** Consume the oldest message matching `predicate`, leaving the rest of
+	 *  the mailbox intact — no take/requeue churn for correlation scans. */
+	takeMatching(agentId: string, predicate: (message: IrcMessage) => boolean): IrcMessage | undefined {
+		const mailbox = this.#mailboxes.get(agentId);
+		if (!mailbox) return undefined;
+		const index = mailbox.findIndex(predicate);
+		if (index === -1) return undefined;
+		const [message] = mailbox.splice(index, 1);
+		if (mailbox.length === 0) this.#mailboxes.delete(agentId);
+		return message;
+	}
+
+	/** Put a taken-but-unconsumed message back at the FRONT of the mailbox:
+	 *  oldest-first order is preserved for later `wait`/`take` callers. */
+	redeliver(agentId: string, message: IrcMessage): void {
+		let mailbox = this.#mailboxes.get(agentId);
+		if (!mailbox) {
+			mailbox = [];
+			this.#mailboxes.set(agentId, mailbox);
+		}
+		mailbox.unshift(message);
+	}
+
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
+	}
+
+	/** Fan out to deliver listeners (mirrors the send-listener loop; a
+	 *  throwing observer never blocks delivery). */
+	#notifyDeliver(message: IrcMessage): void {
+		for (const listener of [...this.#deliverListeners]) {
+			try {
+				listener(message);
+			} catch {
+				// Observer failures never block the deliver path.
+			}
+		}
 	}
 
 	#enqueue(message: IrcMessage): void {

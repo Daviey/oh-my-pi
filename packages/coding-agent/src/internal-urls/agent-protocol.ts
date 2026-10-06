@@ -25,7 +25,19 @@ import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { executeSend, isIrcEnabled } from "../irc/messaging";
+import {
+	executeBoardOp,
+	executeForumPost,
+	executeForumRead,
+	executeRequest,
+	executeSend,
+	isIrcEnabled,
+	listForums,
+	peerDirectory,
+	renderBoard,
+} from "../irc/messaging";
+import { currentHubClient } from "../irc/remote/hub-manager";
+import type { ForumFrame } from "../irc/remote/protocol";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
@@ -134,6 +146,38 @@ function isSuperseded(registry: AgentRegistry, outputId: string): boolean {
 }
 
 /**
+ * Threaded forum render: roots in arrival order; replies (inReplyTo =
+ * `${from}|${ts}` of the referenced frame) indented beneath their root,
+ * nested to any depth. Orphan replies append at top level with a note.
+ */
+function renderThreadedForum(log: ForumFrame[]): string {
+	const keyOf = (f: ForumFrame) => `${f.from}|${f.ts}`;
+	const byKey = new Map(log.map(f => [keyOf(f), f]));
+	const children = new Map<string, ForumFrame[]>();
+	const roots: ForumFrame[] = [];
+	const seen = new Set<string>();
+	for (const f of log) {
+		if (f.inReplyTo && byKey.has(f.inReplyTo) && !seen.has(f.inReplyTo)) {
+			const list = children.get(f.inReplyTo) ?? [];
+			list.push(f);
+			children.set(f.inReplyTo, list);
+		} else {
+			roots.push(f);
+		}
+		seen.add(keyOf(f));
+	}
+	const lines: string[] = [];
+	const render = (f: ForumFrame, depth: number): void => {
+		const indent = "  ".repeat(depth);
+		const orphan = depth === 0 && f.inReplyTo && !byKey.has(f.inReplyTo) ? " (orphan reply)" : "";
+		lines.push(`${indent}[${new Date(f.ts).toISOString()}] ${f.from}: ${f.body}${orphan}`);
+		for (const child of children.get(keyOf(f)) ?? []) render(child, depth + 1);
+	};
+	for (const root of roots) render(root, 0);
+	return lines.join("\n");
+}
+
+/**
  * Handler for agent:// URLs.
  *
  * Resolves output IDs like "reviewer_0" to their artifact files,
@@ -182,16 +226,79 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const to = url.rawHost || url.hostname;
+		const rawHost0 = url.rawHost || url.hostname;
+		// agent://board?op=post&title=... | ?op=claim&id=... | ?op=release&id=... | ?op=done&id=...
+		// `board` is a RESERVED id: cross-session work items.
+		if (rawHost0 === "board") {
+			const opRaw = url.searchParams?.get("op") ?? "post";
+			if (opRaw !== "post" && opRaw !== "claim" && opRaw !== "release" && opRaw !== "done") {
+				throw new Error("agent://board op must be post, claim, release, or done.");
+			}
+			const result = await executeBoardOp(
+				{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+				{ op: opRaw, title: url.searchParams?.get("title") ?? undefined, itemId: url.searchParams?.get("id") ?? undefined },
+			);
+			return {
+				content: [{ type: "text", text: result.content.find(item => item.type === "text")?.text ?? "Board op failed." }],
+				details: { message: result.details },
+				isError: result.isError,
+			};
+		}
+		// agent://forum/<channel> — post to a self-forming forum channel.
+		// `forum` is a RESERVED id like request/all/peers.
+		if (rawHost0 === "forum") {
+			const channel = decodeURIComponent(url.pathname.replace(/^\//, ""));
+			const replyToFrame = url.searchParams?.get("replyTo");
+			const result = await executeForumPost(
+				{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+				{ channel, message: content, ...(replyToFrame ? { inReplyTo: decodeURIComponent(replyToFrame) } : {}) },
+			);
+			return {
+				content: [{ type: "text", text: result.content.find(item => item.type === "text")?.text ?? "Forum post failed." }],
+				details: { message: result.details },
+				isError: result.isError,
+			};
+		}
+		// agent://request/<to>?timeoutMs=N — synchronous request/reply: blocks
+		// (bounded) until the peer's reply with matching replyTo arrives or the
+		// timeout elapses. `request` is a RESERVED id: a peer literally named
+		// "request" is addressable only via scoped forms (system:request etc.).
+		const isRequest = (url.rawHost || url.hostname) === "request";
+		const to = isRequest
+			? decodeURIComponent(url.pathname.replace(/^\//, ""))
+			: (url.rawHost || url.hostname);
 		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (hasPathExtraction(url)) {
+		if (!isRequest && hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		if (isRequest) {
+			const segments = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+			if (segments.length !== 1) {
+				throw new Error("agent://request requires exactly one recipient segment: agent://request/<id>");
+			}
+		}
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
-		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
-		);
+		const timeoutMsRaw = url.searchParams?.get("timeoutMs");
+		const timeoutMs = timeoutMsRaw !== null && timeoutMsRaw !== "" ? Number(timeoutMsRaw) : undefined;
+		const urgent = url.searchParams?.get("urgent") === "1" || url.searchParams?.get("urgent") === "true";
+		// ?replyTo=<msgId> correlates a reply with an in-flight request (the
+		// requester's takeMatching scans for this exact field on the reply).
+		const replyToRaw = url.searchParams?.get("replyTo");
+		const replyTo = replyToRaw !== null && replyToRaw !== "" ? decodeURIComponent(replyToRaw) : undefined;
+		const result = isRequest
+			? await executeRequest(
+					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+					{
+						to,
+						message: content,
+						...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+						...(urgent ? { urgent } : {}),
+					},
+				)
+			: await executeSend(
+					{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
+					{ to, message: content, ...(urgent ? { urgent } : {}), ...(replyTo ? { replyTo } : {}) },
+				);
 		return {
 			content: [
 				{
@@ -207,6 +314,71 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
+		if (outputId === "forums") {
+			const forums = listForums();
+			const content =
+				forums.length === 0
+					? "(no forum channels seen yet — post to create one)"
+					: forums
+							.map(f => `${f.channel}  ${f.messages} msgs  last ${new Date(f.lastActivity).toISOString()}  [${f.participants.join(", ")}]`)
+							.join("\n");
+			return {
+				url: url.toString(),
+				content,
+				contentType: "text/plain",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
+		if (outputId === "board") {
+			const content = renderBoard();
+			return {
+				url: url.toString(),
+				content,
+				contentType: "text/plain",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
+		if (outputId === "forum") {
+			const channel = decodeURIComponent(url.pathname.replace(/^\//, ""));
+			const client = currentHubClient();
+			if (!client || typeof client.onForum !== "function") {
+				throw new Error("agent://forum: no hub client — forum history unavailable.");
+			}
+			const log = executeForumRead(channel);
+			const content = log.length === 0 ? "(no messages yet on this channel)" : renderThreadedForum(log);
+			return {
+				url: url.toString(),
+				content,
+				contentType: "text/plain",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
+		if (outputId === "peers") {
+			// agent://peers — routing identity surface: own namespace + live
+			// hub roster. Read this BEFORE targeting anyone; project hashes
+			// are not derivable from path names and self-reported IRC
+			// identity conflates under id collisions (every main agent is
+			// "Main"). locate() stays null (not file-backed).
+			const directory = await peerDirectory();
+			if (!directory) {
+				throw new Error("agent://peers: hub unavailable (disabled or disconnected). If you have a known-good pid from an earlier roster dump, agent://pid:<pid>:<peerId> works; otherwise retry agent://peers when the hub returns.");
+			}
+			const content = JSON.stringify(directory, null, 2);
+			return {
+				url: url.toString(),
+				content,
+				contentType: "application/json",
+				shape: "document",
+				size: Buffer.byteLength(content),
+				immutable: true,
+			};
+		}
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}

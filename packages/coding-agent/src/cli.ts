@@ -33,6 +33,7 @@ import {
 	BLOB_BROKER_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
 	DAEMON_BROKER_WORKER_ARG,
+	HUB_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
@@ -287,6 +288,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./subprocess/parent-watchdog-worker");
+		return true;
+	}
+	if (arg === HUB_BROKER_WORKER_ARG) {
+		// Worker selectors must dispatch before the normal command graph loads.
+		const { startHubBrokerFromEnvironment } = await import("./irc/remote/broker");
+		await startHubBrokerFromEnvironment();
 		return true;
 	}
 	if (arg === DAEMON_BROKER_WORKER_ARG) {
