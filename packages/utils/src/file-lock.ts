@@ -38,11 +38,6 @@ function tryAcquireLock(lockPath: string): NativeFileLock | null {
 	return null;
 }
 
-/** Acquire an exclusive lease without waiting; `null` while another holder owns it. */
-export function tryAcquireFileLock(filePath: string): FileLockHandle | null {
-	return tryAcquireLock(getLockPath(filePath));
-}
-
 /** Acquire an exclusive lease; callers must release it when their operation ends. */
 export async function acquireFileLock(filePath: string, options: FileLockOptions = {}): Promise<FileLockHandle> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };

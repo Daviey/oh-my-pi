@@ -39,7 +39,6 @@ import {
 	SessionManager,
 	sameJournalIdentity,
 } from "../session/session-manager";
-import { FileSessionStorage } from "../session/session-storage";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -240,8 +239,8 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true || flags.stale === true;
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true || flags.undoTails === true;
+	const selected =
+		flags.blobs === true || flags.archive === true || flags.wal === true || flags.stale === true || flags.undoTails === true;
 	const archiveSelected = selected && flags.archive === true;
 	const staleSelected = selected && flags.stale === true;
 	const needsArchiveSettings =

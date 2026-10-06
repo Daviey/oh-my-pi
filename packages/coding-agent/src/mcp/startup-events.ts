@@ -1,4 +1,4 @@
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, redactSecrets, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	replaceTabs,
 	shortenEmbeddedPaths,
