@@ -125,12 +125,37 @@ import {
 	NON_VISION_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
 
+import type { RoutingReport } from "../types";
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
+
+function parseRoutingReport(report: unknown, requested: string): RoutingReport | undefined {
+	if (typeof report !== "object" || report === null) return undefined;
+	const r = report as Record<string, unknown>;
+	if (typeof r.route !== "string" || typeof r.reason !== "string") return undefined;
+	return {
+		requested,
+		route: r.route,
+		reason: r.reason,
+		method: typeof r.method === "string" ? r.method : "default",
+		failovers: Array.isArray(r.failovers)
+			? r.failovers.map((f: unknown): { provider: string; reason: string } => {
+					if (f && typeof f === "object" && "provider" in f && "reason" in f) {
+						return {
+							provider: typeof f.provider === "string" ? f.provider : "unknown",
+							reason: typeof f.reason === "string" ? f.reason : "unknown",
+						};
+					}
+					return { provider: "unknown", reason: "unknown" };
+				})
+			: [],
+	};
+}
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
 type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
 	provider?: unknown;
+	routing?: unknown;
 };
 
 type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
@@ -1386,7 +1411,30 @@ const streamOpenAICompletionsOnce = (
 					if (streamFinishedAt !== undefined && sawUsagePayload) break;
 					continue;
 				}
+				output.responseId ||= chunk.id;
 
+				if (!output.upstreamProvider) {
+					const upstreamProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
+					output.upstreamProvider =
+						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
+				}
+				if (!output.routingReport) {
+					const routingReport = parseRoutingReport(
+						(chunk as ProviderAttributedChatCompletionChunk).routing,
+						activeRequestParams?.model ?? "",
+					);
+					if (routingReport) output.routingReport = routingReport;
+				}
+				const wireModelId = activeRequestParams?.model;
+				const echoed = chunk.model;
+				if (
+					wireModelId !== undefined &&
+					typeof echoed === "string" &&
+					echoed.length > 0 &&
+					echoed !== wireModelId
+				) {
+					output.upstreamModel = echoed;
+				}
 				if (!chunk.usage) {
 					const choiceUsage = (choice as OpenAICompletionsChoiceUsage).usage;
 					if (typeof choiceUsage === "object" && choiceUsage !== null) {
