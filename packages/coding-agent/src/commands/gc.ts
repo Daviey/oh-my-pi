@@ -18,6 +18,12 @@ export default class Gc extends Command {
 		stale: Flags.boolean({
 			description: "Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
 		}),
+		"undo-tails": Flags.boolean({
+			description: "Prune off-branch tails of older /undo branches (active path and newest tails kept)",
+		}),
+		"keep-undo-tails": Flags.integer({
+			description: "How many newest undo tails to keep redoable (default 1)",
+		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
 		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
@@ -38,6 +44,8 @@ export default class Gc extends Command {
 				archive: flags.archive,
 				wal: flags.wal,
 				stale: flags.stale,
+				undoTails: flags["undo-tails"],
+				keepUndoTails: flags["keep-undo-tails"],
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],

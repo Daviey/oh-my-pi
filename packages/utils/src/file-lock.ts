@@ -18,17 +18,16 @@ export interface FileLockOptions {
 	signal?: AbortSignal;
 }
 
-/** An exclusive OS-backed lease. Releasing an already released handle is safe. */
-export interface FileLockHandle {
-	release(): void;
-}
+/** Named handle type for the OS-backed lock (stable API surface for callers). */
+export type FileLockHandle = NativeFileLock;
 
 const DEFAULT_OPTIONS = {
 	retries: 50,
 	retryDelayMs: 100,
 };
 
-function getLockPath(filePath: string): string {
+/** The OS-lock identity {@link withFileLock} derives for a guarded path. */
+export function lockPathFor(filePath: string): string {
 	return `${path.resolve(filePath)}.lock`;
 }
 
@@ -47,7 +46,7 @@ export function tryAcquireFileLock(filePath: string): FileLockHandle | null {
 /** Acquire an exclusive lease; callers must release it when their operation ends. */
 export async function acquireFileLock(filePath: string, options: FileLockOptions = {}): Promise<FileLockHandle> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const lockPath = getLockPath(filePath);
+	const lockPath = lockPathFor(filePath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
 		opts.signal?.throwIfAborted();
@@ -61,7 +60,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 
 function acquireLockSync(filePath: string, options: FileLockOptions = {}): NativeFileLock {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const lockPath = getLockPath(filePath);
+	const lockPath = lockPathFor(filePath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
 		opts.signal?.throwIfAborted();
@@ -71,6 +70,16 @@ function acquireLockSync(filePath: string, options: FileLockOptions = {}): Nativ
 	}
 
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+}
+
+/**
+ * Synchronous non-blocking claim on the same lock {@link withFileLock} uses.
+ * Sync call sites (session writer open, synchronous rewrites) pair this with
+ * `release()` in a `finally`; contended acquirers surface an error rather
+ * than blocking.
+ */
+export function tryAcquireFileLock(filePath: string): NativeFileLock | null {
+	return tryAcquireLock(lockPathFor(filePath));
 }
 
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
@@ -103,5 +112,5 @@ export function withFileLockSync<T>(filePath: string, fn: () => T, options: File
  */
 export const __internalsForTesting = {
 	tryAcquireLock,
-	getLockPath,
+	getLockPath: lockPathFor,
 };

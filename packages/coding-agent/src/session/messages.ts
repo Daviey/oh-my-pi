@@ -882,6 +882,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 }
 
 /**
+
  * Convert a BashExecutionMessage to user message text for LLM context.
  */
 export function bashExecutionToText(msg: BashExecutionMessage): string {
