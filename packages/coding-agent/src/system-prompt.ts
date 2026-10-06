@@ -14,6 +14,9 @@ import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
 import type { SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
+import type { Settings } from "./config/settings";
+import { isHubEnabled } from "./irc/remote/hub-manager";
+import { cfgHubSystemScopeEnabled } from "./hub/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import type { EvalPreludeDefinition } from "./eval/preludes";
@@ -518,6 +521,8 @@ export interface BuildSystemPromptOptions {
 	nativeTools?: boolean;
 	/** Skills settings for discovery. */
 	skillsSettings?: SkillsSettings;
+	/** Session settings (hub on/off etc.); omitted reads process-global state. */
+	settings?: Settings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute. Injected into the project prompt. */
@@ -642,6 +647,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedAppendSystemPrompt: providedResolvedAppendPrompt,
 		nativeTools = true,
 		skillsSettings,
+		settings,
 		toolNames: providedToolNames,
 		directToolNames,
 		cwd,
@@ -958,7 +964,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = getEnvironmentInfo();
+	// Hub discoverability: when the system-scope hub is on for this session,
+	// the prompt gets a Peer Sessions section (scope syntax + reply contract).
+	const hubEnabled = settings !== undefined && cfgHubSystemScopeEnabled.get(settings) && isHubEnabled();
 	const data = {
+		hubEnabled,
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
