@@ -284,7 +284,7 @@ function buildSummary(session: DapSession): DapSessionSummary {
 export class DapSessionManager {
 	#sessions = new Map<string, DapSession>();
 	#activeSessionId: string | null = null;
-	#cleanupLoopPromise?: Promise<void>;
+	#cleanupTimerStarted = false;
 	#nextId = 0;
 	#treeOutcomeWaiters = new Set<DapTreeOutcomeWaiter>();
 
@@ -1160,18 +1160,21 @@ export class DapSessionManager {
 	}
 
 	#startCleanupTimer(): void {
-		if (this.#cleanupLoopPromise) return;
-		this.#cleanupLoopPromise = this.#runCleanupLoop();
-	}
-
-	async #runCleanupLoop(): Promise<void> {
-		for await (const _ of timers.setInterval(CLEANUP_INTERVAL_MS, null, { ref: false })) {
+		if (this.#cleanupTimerStarted) return;
+		this.#cleanupTimerStarted = true;
+		// Plain callback interval, not `for await (timers.setInterval(...))`:
+		// Bun's node:timers/promises interval ASYNC ITERATOR busy-spins (~70%
+		// CPU) whenever the event loop is otherwise idle — measured on every
+		// supported runtime (1.3.14–1.4.2). A manual unref'd callback has the
+		// same non-holding semantics with none of the iterator machinery.
+		const timer = setInterval(() => {
 			try {
 				this.#cleanupIdleSessions();
 			} catch (error) {
 				logger.error("DAP idle session cleanup failed", { error: toErrorMessage(error) });
 			}
-		}
+		}, CLEANUP_INTERVAL_MS);
+		timer.unref?.();
 	}
 
 	#cleanupIdleSessions(): void {

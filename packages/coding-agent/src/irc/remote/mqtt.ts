@@ -80,7 +80,8 @@ const REQUEST_TIMEOUT_MS = 2_000;
 
 /** Presence heartbeat interval for the retained-slot republish (ms). */
 const HEARTBEAT_INTERVAL_MS = 30_000;
-
+/** Outbound bytes above this for two consecutive heartbeats = stuck socket. */
+const MQTT_BACKLOG_LIMIT_BYTES = 64 * 1024;
 /** Minimal MqttClient surface this transport needs — keeps the fake lean. */
 export interface MqttLikeClient {
 	endAsync(force?: boolean): Promise<void>;
@@ -89,6 +90,9 @@ export interface MqttLikeClient {
 	on(event: "message", cb: (topic: string, payload: Buffer) => void): void;
 	on(event: "close", cb: () => void): void;
 	on(event: "error", cb: (err: Error) => void): void;
+	/** mqtt.js exposes the underlying socket; fakes omit it. Used by the
+	 *  stuck-socket watchdog — undefined simply disables the check. */
+	readonly stream?: { readonly writableLength?: number } | undefined;
 }
 
 /** What the connect factory returns; `null` = broker refused/unreachable. */
@@ -431,10 +435,36 @@ export class MqttHubClient implements HubClientLike {
 	 *  lastSeen stamp every interval (roster freshness on the area). */
 	#startHeartbeat(presenceTopic: string): void {
 		clearInterval(this.#heartbeatTimer);
+		let stuckChecks = 0;
 		this.#heartbeatTimer = setInterval(() => {
 			const identity = this.#identity;
 			const client = this.#client;
 			if (!identity || !client) return;
+			// Stuck-socket watchdog: a broker that stopped reading this session
+			// (keepalive kills observed server-side) leaves a half-open TCP peer
+			// that never emits "close", while publishes pile into the kernel
+			// send buffer and the client spins. Two consecutive heartbeats with
+			// a full outbound buffer means dead: force-destroy; the close
+			// handler fires and the retry ladder reconnects fresh.
+			const backlog = client.stream?.writableLength;
+			if (backlog !== undefined && backlog > MQTT_BACKLOG_LIMIT_BYTES) {
+				stuckChecks += 1;
+				if (stuckChecks >= 2) {
+					logger.warn("hub mqtt: outbound buffer stuck, forcing reconnect", {
+						backlog,
+						area: this.area,
+					});
+					// Stop the interval before destroying: the close event only
+					// flushes waiters; a fresh client owns the next heartbeat.
+					clearInterval(this.#heartbeatTimer);
+					this.#heartbeatTimer = undefined;
+					void client.endAsync(true).catch(() => undefined);
+					return;
+				}
+				// Don't pile another retained publish onto a full buffer.
+				return;
+			}
+			stuckChecks = 0;
 			void client
 				.publishAsync(presenceTopic, JSON.stringify({ ...identity, lastSeen: Date.now() }), { qos: 1, retain: true })
 				.catch(() => {

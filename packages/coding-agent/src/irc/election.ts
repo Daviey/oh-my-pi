@@ -43,6 +43,10 @@ export interface ElectionOptions {
 	maxMiddles?: number;
 	/** Delay before a node's first claim (ms). Default 50ms. */
 	claimDelayMs?: number;
+	/** Minimum spacing between broadcast claims on the raw clock. Default
+	 *  caps a sick fleet at one claim per node per second; tests tighten
+	 *  it to exercise refresh cadence under virtual time. */
+	minClaimIntervalMs?: number;
 	/** Clock for lease math (test seam). */
 	now?: () => number;
 	/** Scheduler (test seam). */
@@ -58,7 +62,16 @@ export function claimWins(incoming: ElectionLease, local: ElectionLease | undefi
 	if (incoming.claimedAt !== local.claimedAt) return incoming.claimedAt < local.claimedAt;
 	return incoming.leaderSessionId < local.leaderSessionId;
 }
-
+/** Default floor between two claims this node broadcasts, on the RAW
+ *  clock (options.now — Date.now in production; NOT the skew-anchored
+ *  #now). Caps a sick fleet at one claim per node per second even when
+ *  every node misreads every lease as expired (observed: a
+ *  self-sustaining ~9K frames/s claim war across 15 peers). */
+const DEFAULT_MIN_CLAIM_INTERVAL_MS = 1_000;
+/** Minimum grace after a CONTESTED seat opens before this node claims,
+ *  so a fleet that simultaneously sees expiry desynchronizes instead of
+ *  storming. A cold start (no lease ever seen) claims without waiting. */
+const SEAT_OPEN_GRACE_FLOOR_MS = 50;
 /** One node's election state machine. Attach one per process; the hub
  *  manager wires it to the live client and folds roles into the roster. */
 export class ElectionNode {
@@ -78,7 +91,14 @@ export class ElectionNode {
 	#client: HubClientLike | undefined;
 	#timers: { clear: () => void }[] = [];
 	#closed = false;
-	readonly options: Required<Pick<ElectionOptions, "leaseTtlMs" | "refreshMs" | "heartbeatMs" | "maxMiddles" | "claimDelayMs">> & {
+	/** Raw-clock stamp of the last broadcast claim (throttle input). */
+	#lastClaimSentAt = Number.NEGATIVE_INFINITY;
+	/** Raw-clock stamp of when a contested seat was first seen open. */
+	#seatOpenSince: number | undefined;
+	/** True once any lease (own or foreign) has been observed; gates the
+	 *  seat-open grace to contested transitions, not cold starts. */
+	#sawLease = false;
+	readonly options: Required<Pick<ElectionOptions, "leaseTtlMs" | "refreshMs" | "heartbeatMs" | "maxMiddles" | "claimDelayMs" | "minClaimIntervalMs">> & {
 		now: () => number;
 		schedule: (fn: () => void, ms: number) => { clear: () => void };
 	};
@@ -91,6 +111,7 @@ export class ElectionNode {
 			heartbeatMs: options.heartbeatMs ?? 30_000,
 			maxMiddles: options.maxMiddles ?? 2,
 			claimDelayMs: options.claimDelayMs ?? 50,
+			minClaimIntervalMs: options.minClaimIntervalMs ?? DEFAULT_MIN_CLAIM_INTERVAL_MS,
 			now: options.now ?? (() => Date.now()),
 			schedule: options.schedule ?? ((fn, ms) => {
 				const timer = setTimeout(fn, ms);
@@ -213,8 +234,10 @@ export class ElectionNode {
 			this.#lease = undefined;
 			this.#stats.abdicationsSeen++;
 			this.#setRole("member");
-			// Contest the open seat after the claim delay — contention
-			// resolves via claimWins (earliest claimedAt, id tiebreak).
+			// The seat opened NOW (abdication arrival is the true open
+			// moment for the grace window). Contest after the grace +
+			// claim delay — contention resolves via claimWins.
+			if (this.#seatOpenSince === undefined) this.#seatOpenSince = this.options.now();
 			this.#arm(() => this.#evaluate(), this.options.claimDelayMs);
 			return;
 		}
@@ -245,6 +268,7 @@ export class ElectionNode {
 			this.#stats.claimsRejected++;
 			return;
 		}
+		this.#sawLease = true;
 		this.#lease = incoming;
 		this.#applyMiddles(frame.middles);
 		// A valid foreign lease means we are not the leader — settle into
@@ -269,6 +293,8 @@ export class ElectionNode {
 		const lease = this.#lease;
 		if (lease && lease.leaderSessionId === this.ownSessionId && lease.leaseUntil >= now) {
 			// Incumbent refresh: same establishment time, extended deadline.
+			this.#seatOpenSince = undefined;
+			this.#sawLease = true;
 			const middles = this.#leaderMiddles();
 			this.#lease = { ...lease, leaseUntil: now + this.options.leaseTtlMs };
 			this.#sendClaim(this.#lease, middles);
@@ -276,8 +302,24 @@ export class ElectionNode {
 			return;
 		}
 		if (!lease || lease.leaseUntil < now) {
-			// Open seat: claim it. Optimistic leader until a better claim
-			// arrives — contention is settled by claimWins on receipt.
+			// Open seat. A cold start (no lease ever observed) claims at
+			// once — there is nothing to war with. But a seat that OPENED
+			// (lease expired, lost, or abdicated) waits out a grace window
+			// measured from the TRUE open moment (the expired lease's own
+			// deadline, or the abdication arrival): a fleet that
+			// simultaneously sees the seat open must desynchronize instead
+			// of storming.
+			const raw = this.options.now();
+			const graceMs = Math.max(SEAT_OPEN_GRACE_FLOOR_MS, this.options.claimDelayMs);
+			if (this.#sawLease) {
+				if (this.#seatOpenSince === undefined) this.#seatOpenSince = lease ? lease.leaseUntil : raw;
+				if (raw - this.#seatOpenSince < graceMs) {
+					this.#arm(() => this.#evaluate(), Math.max(1, graceMs - (raw - this.#seatOpenSince)));
+					return;
+				}
+			}
+			// Grace elapsed (or cold start): claim it. Optimistic leader
+			// until a better claim arrives — claimWins settles contention.
 			const middles = this.#leaderMiddles();
 			this.#lease = { leaderSessionId: this.ownSessionId, leaseUntil: now + this.options.leaseTtlMs, claimedAt: now };
 			this.#setRole("leader");
@@ -286,6 +328,8 @@ export class ElectionNode {
 			return;
 		}
 		// Valid foreign lease: re-check when it expires.
+		this.#seatOpenSince = undefined;
+		this.#sawLease = true;
 		this.#arm(() => this.#evaluate(), Math.max(1, lease.leaseUntil - now + 1));
 	}
 
@@ -302,8 +346,13 @@ export class ElectionNode {
 		this.#arm(() => this.#beat(), this.options.heartbeatMs);
 	}
 
-	/** Broadcast one leader claim over the transport's election path. */
+	/** Broadcast one leader claim over the transport's election path.
+	 *  Rate-floored on the wall clock: no clock pathology (skew anchor
+	 *  drift, degraded monotonic timers) can turn this into a storm. */
 	#sendClaim(lease: ElectionLease, middles: string[]): void {
+		const raw = this.options.now();
+		if (raw - this.#lastClaimSentAt < this.options.minClaimIntervalMs) return;
+		this.#lastClaimSentAt = raw;
 		this.#client?.sendElection?.({
 			type: "leaderClaim",
 			leaderSessionId: lease.leaderSessionId,

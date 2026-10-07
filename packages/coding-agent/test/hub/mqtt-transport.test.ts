@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
 	hubFramesTopic,
 	hubPresenceTopic,
@@ -18,6 +18,7 @@ class FakeMqttClient implements MqttLikeClient {
 	subscribed: { topic: string; qos?: number }[] = [];
 	ended = false;
 	endForced: boolean[] = [];
+	stream: { writableLength?: number } | undefined = undefined;
 	#messageHandlers: ((topic: string, payload: Buffer) => void)[] = [];
 	#closeHandlers: (() => void)[] = [];
 	#errorHandlers: ((err: Error) => void)[] = [];
@@ -378,3 +379,65 @@ describe("topic helpers", () => {
 	});
 });
 
+
+describe("stuck-socket watchdog", () => {
+	beforeEach(() => {
+		installFactory();
+	});
+
+	it("withholds heartbeats and forces exactly one reconnect on a stuck outbound buffer", async () => {
+		jest.useFakeTimers();
+		let client: MqttHubClient | null = null;
+		try {
+			client = await MqttHubClient.connect({
+				url: "mqtt://alice:secret@broker.local:1883",
+				area: "team",
+				identity: identity(),
+			});
+			expect(client).not.toBeNull();
+			const fake = fakes[0]!;
+			const presencePublishes = () =>
+				fake.published.filter(entry => entry.topic.startsWith("hub/team/presence/")).length;
+			const baseline = presencePublishes();
+			fake.stream = { writableLength: 128 * 1024 };
+
+			// First stuck heartbeat: no publish, no teardown yet.
+			jest.advanceTimersByTime(30_000);
+			expect(fake.endForced).toEqual([]);
+			expect(presencePublishes()).toBe(baseline);
+
+			// Second stuck heartbeat: forced destroy, interval cleared, no re-fire.
+			jest.advanceTimersByTime(30_000);
+			expect(fake.endForced).toEqual([true]);
+			jest.advanceTimersByTime(90_000);
+			expect(fake.endForced).toEqual([true]);
+			expect(presencePublishes()).toBe(baseline);
+		} finally {
+			jest.useRealTimers();
+			client?.close();
+		}
+	});
+
+	it("keeps heartbeating while the buffer stays under the limit", async () => {
+		jest.useFakeTimers();
+		let client: MqttHubClient | null = null;
+		try {
+			client = await MqttHubClient.connect({
+				url: "mqtt://alice:secret@broker.local:1883",
+				area: "team",
+				identity: identity(),
+			});
+			expect(client).not.toBeNull();
+			const fake = fakes[0]!;
+			fake.stream = { writableLength: 512 };
+			jest.advanceTimersByTime(30_000);
+			jest.advanceTimersByTime(30_000);
+			expect(fake.endForced).toEqual([]);
+			const heartbeats = fake.published.filter(entry => entry.topic.startsWith("hub/team/presence/")).length;
+			expect(heartbeats).toBe(3); // initial republish + two heartbeats
+		} finally {
+			jest.useRealTimers();
+			client?.close();
+		}
+	});
+});

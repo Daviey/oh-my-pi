@@ -25,7 +25,7 @@ afterAll(() => {
 });
 
 /** Compact election timings. */
-const TIGHT = { leaseTtlMs: 1_500, refreshMs: 400, heartbeatMs: 300, claimDelayMs: 20 };
+const TIGHT = { leaseTtlMs: 1_500, refreshMs: 400, heartbeatMs: 300, claimDelayMs: 20, minClaimIntervalMs: 5 };
 
 function identity(agentId: string, project: string, sessionId: string) {
 	return { agentId, project, status: "running" as const, pid: process.pid, sessionId };
@@ -201,7 +201,7 @@ describe("election state machine (virtual clock)", () => {
 		// Leader dies silently: no refresh, no goodbye frame.
 		leader.close();
 		// Past the expired lease (+1ms re-check slack) the survivor claims.
-		clock.advance(TIGHT.leaseTtlMs + 2);
+		clock.advance(TIGHT.leaseTtlMs + 2 + Math.max(50, TIGHT.claimDelayMs) + TIGHT.claimDelayMs * 2 + 1);
 		expect(survivor.electionRole()).toBe("leader");
 		expect(survivor.currentLease()?.leaderSessionId).toBe(survivor.ownSessionId);
 
@@ -383,8 +383,9 @@ describe("graceful abdication", () => {
 		leader.close();
 		// Abdication reached the follower synchronously through the wire.
 		expect(wire.sent.some(f => f.type === "leaderAbdicate")).toBe(true);
-		// Far short of leaseTtl: the seat is re-contested after claimDelay.
-		clock.advance(TIGHT.claimDelayMs + 1);
+		// Far short of leaseTtl: the seat is re-contested after the
+		// seat-open grace (floor 50ms) + jitter, not the full lease.
+		clock.advance(Math.max(50, TIGHT.claimDelayMs) + TIGHT.claimDelayMs * 2 + 1);
 		expect(follower.electionRole()).toBe("leader");
 
 		follower.close();
@@ -423,7 +424,7 @@ describe("graceful abdication", () => {
 		// Holder abdicates: counted, seat opens.
 		deliver({ type: "leaderAbdicate", leaderSessionId: "real-leader" });
 		expect(c.electionStats().abdicationsSeen).toBe(1);
-		clock.advance(TIGHT.claimDelayMs + 1);
+		clock.advance(Math.max(50, TIGHT.claimDelayMs) + TIGHT.claimDelayMs * 2 + 1);
 		expect(c.electionRole()).toBe("leader"); // c claimed the open seat
 		expect(c.electionStats().roleFlips).toBeGreaterThanOrEqual(1);
 		c.close();
@@ -445,5 +446,59 @@ describe("graceful abdication", () => {
 		expect(wire.sent.some(f => f.type === "leaderAbdicate")).toBe(false);
 		expect(leader.electionRole()).toBe("leader");
 		leader.close();
+	});
+});
+
+describe("claim-storm quiesce", () => {
+	it("a flood of ever-winning foreign claims cannot trigger a claim storm back", () => {
+		const clock = new ManualClock();
+		const stubClient = { handler: undefined as ((f: HubElectionServerFrame) => void) | undefined };
+		const stub = {
+			roster: async () => [],
+			publish: async () => null,
+			request: async () => null,
+			onRequest: () => {},
+			onElection: (h: ((f: HubElectionServerFrame) => void) | null) => { stubClient.handler = h ?? undefined; },
+			sendElection: () => {},
+			setStatus: async () => {},
+			onDelivery: () => {},
+			onClose: () => {},
+			close: () => {},
+		} as const;
+		// Default throttle (1s) — this is the production guard under test.
+		const c = new ElectionNode("node-c", { ...TIGHT, minClaimIntervalMs: undefined, now: clock.now, schedule: clock.schedule } as ConstructorParameters<typeof ElectionNode>[1]);
+		c.attach(stub as unknown as HubClientLike);
+		const deliver = (frame: HubElectionServerFrame) => stubClient.handler!(frame);
+		const sent: HubElectionClientFrame[] = [];
+		// Own sends via a spy client: re-attach with recording sendElection.
+		const spy = { ...stub, sendElection: (f: HubElectionClientFrame) => sent.push(f) } as const;
+		c.attach(spy as unknown as HubClientLike);
+
+		// 300 foreign claims, one per ms — the observed war shape: skewed
+		// clocks make every claim win (ever-earlier claimedAt) and half of
+		// them arrive already-expired, so the local node keeps re-entering
+		// the open-seat path and attempting claims of its own.
+		for (let i = 0; i < 300; i++) {
+			clock.advance(1);
+			const expired = i % 2 === 0;
+			deliver({
+				type: "leaderClaim",
+				leaderSessionId: `stormer-${i % 15}`,
+				leaseUntil: clock.now() + (expired ? -5 : 60),
+				claimedAt: clock.now() - i,
+			});
+		}
+		// During the flood the seat-open grace alone keeps this node
+		// quiet: claims arrive faster than the grace window, so zero
+		// claims are ever attempted.
+		const duringFlood = sent.filter(f => f.type === "leaderClaim");
+		expect(duringFlood.length).toBe(0);
+		// Liveness: once the war stops, the last lease expires and the
+		// node claims the open seat exactly once (throttle backstop).
+		clock.advance(2_000);
+		const total = sent.filter(f => f.type === "leaderClaim");
+		expect(total.length).toBe(1);
+		expect(c.electionRole()).toBe("leader");
+		c.close();
 	});
 });
