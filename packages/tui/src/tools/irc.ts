@@ -15,6 +15,13 @@ export interface IrcMessage {
 	/** Message id being answered. */
 	replyTo?: string;
 	/**
+	 * Sender's session id, stamped by the hub transports at transmit. Agent
+	 * ids collide across processes (every main agent is "Main"), so this is
+	 * the unambiguous reply address: `session:<id>` targets it exactly,
+	 * cross-project included. Absent on messages from pre-session peers.
+	 */
+	fromSessionId?: string;
+	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the
 	 * recipient's own wake-turn relay must skip them or two idle peers

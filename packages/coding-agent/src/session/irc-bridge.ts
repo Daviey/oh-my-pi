@@ -245,11 +245,21 @@ export class IrcBridge {
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
 		// steer. `details.message` keeps the raw body for the transcript card and inbox.
 		const envelopeBody = escapeHarnessTags(msg.body);
+		// Agent ids collide across processes (every main agent is "Main"): a
+		// bare `{{from}}` reply address is ambiguous cross-project and can
+		// even self-resolve. When the sender stamped its session id, address
+		// replies by session — stable, unique, machine-wide.
+		const fromSessionId = typeof msg.fromSessionId === "string" && msg.fromSessionId ? msg.fromSessionId : "";
+		const replyTarget = fromSessionId ? `session:${fromSessionId}` : msg.from;
+		const writeTarget = fromSessionId ? `agent://session:${fromSessionId}` : `agent://${msg.from}`;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",
 			content: prompt.render(ircIncomingTemplate, {
 				from: msg.from,
+				fromSessionId,
+				replyTarget,
+				writeTarget,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
 				msgId: msg.id,
@@ -260,6 +270,7 @@ export class IrcBridge {
 			details: {
 				id: msg.id,
 				from: msg.from,
+				...(fromSessionId ? { fromSessionId } : {}),
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),

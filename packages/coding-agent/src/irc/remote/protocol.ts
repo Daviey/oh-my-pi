@@ -185,6 +185,16 @@ export function hubTargetMatches(target: HubTarget, entry: { agentId: string; pr
 	return true;
 }
 
+/** Stamp the sender's session id onto an outbound peer message. Agent ids
+ *  collide across processes (every main agent is "Main"), so this gives the
+ *  recipient an unambiguous reply address (`session:<id>`); without it a
+ *  cross-project reply degrades to an ambiguous id or a self-delivery
+ *  error. Additive wire field — pre-session peers ignore it. */
+export function stampSenderSession<T extends { fromSessionId?: string }>(msg: T, identity: { sessionId?: string } | undefined): T {
+	const sessionId = identity?.sessionId;
+	return typeof sessionId === "string" && sessionId && !msg.fromSessionId ? { ...msg, fromSessionId: sessionId } : msg;
+}
+
 /** Encode one frame as a newline-terminated JSON line. */
 export function encodeFrame(frame: HubClientFrame | HubServerFrame): string {
 	return `${JSON.stringify(frame)}\n`;

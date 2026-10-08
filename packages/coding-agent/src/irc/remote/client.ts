@@ -25,6 +25,7 @@ import {
 	type HubRosterEntry,
 	type HubServerFrame,
 	type HubTarget,
+	stampSenderSession,
 } from "./protocol";
 
 /** How long any single client operation may take before failing open. */
@@ -179,7 +180,7 @@ export class HubClient {
 	 * `targets` themselves, scoped to the project namespace).
 	 */
 	async publish(msg: IrcMessage, targets: HubTarget[]): Promise<HubPublishResult | null> {
-		const frame = await this.#request({ type: "publish", msg, targets });
+		const frame = await this.#request({ type: "publish", msg: stampSenderSession(msg, this.#identity), targets });
 		return frame?.type === "publishAck" ? { results: frame.results } : null;
 	}
 
@@ -200,7 +201,7 @@ export class HubClient {
 		}, timeoutMs);
 		timer.unref?.();
 		this.#replies.set(id, { resolve, timer });
-		socket.write(encodeFrame({ type: "request", id, msg, targets, timeoutMs }) as string);
+		socket.write(encodeFrame({ type: "request", id, msg: stampSenderSession(msg, this.#identity), targets, timeoutMs }) as string);
 		return promise;
 	}
 
@@ -426,7 +427,7 @@ export class HubClient {
 		const socket = this.#socket;
 		if (!answer || !socket || this.#closed) return;
 		try {
-			socket.write(encodeFrame({ type: "reply", id: frame.id, from: this.#identity?.agentId ?? "", msg: answer }) as string);
+			socket.write(encodeFrame({ type: "reply", id: frame.id, from: this.#identity?.agentId ?? "", msg: stampSenderSession(answer, this.#identity) }) as string);
 		} catch {
 			// best-effort answer; the requester times out without it
 		}

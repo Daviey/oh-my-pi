@@ -47,6 +47,7 @@ import {
 	type HubRosterEntry,
 	type HubServerFrame,
 	type HubTarget,
+	stampSenderSession,
 } from "./protocol";
 import type { HubAgentIdentity, HubClientLike, HubPublishResult, HubRequestHandler, HubRequestResult } from "./client";
 
@@ -309,7 +310,7 @@ export class MqttHubClient implements HubClientLike {
 		this.#acks.set(id, waiter);
 		this.#selfPublishes.add(id);
 		void client
-			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg, targets, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 })
+			.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "publish", msg: stampSenderSession(msg, this.#identity), targets, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 })
 			.catch(() => {
 				// leave the timer to fail the request
 			});
@@ -334,7 +335,7 @@ export class MqttHubClient implements HubClientLike {
 		timer.unref?.();
 		this.#rpcWaits.set(id, { resolve, timer });
 		try {
-			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg, targets, timeoutMs, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 });
+			await client.publishAsync(hubFramesTopic(this.area), encodeFrame({ type: "request", id, msg: stampSenderSession(msg, this.#identity), targets, timeoutMs, fromProject: this.#identity?.project, urgent: msg.urgent }), { qos: 1 });
 		} catch {
 			this.#rpcWaits.delete(id);
 			clearTimeout(timer);
@@ -707,7 +708,7 @@ export class MqttHubClient implements HubClientLike {
 			try {
 				await client.publishAsync(
 					hubFramesTopic(this.area),
-					encodeFrame({ type: "reply", id: frame.id, from: identity.agentId, msg: answer }),
+					encodeFrame({ type: "reply", id: frame.id, from: identity.agentId, msg: stampSenderSession(answer, identity) }),
 					{ qos: 1 },
 				);
 			} catch {
